@@ -13,15 +13,13 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
-        function findEl(b) {
-            if (!b) return null;
-            let el = document.getElementById('product' + b.id) ||
-                     document.querySelector(`.product[data-id="${b.id}"], .building[data-id="${b.id}"]`);
-            if (!el) {
-                let all = document.querySelectorAll('.product, .building');
-                for (let p of all) if (p.textContent.includes(b.name)) return p;
+        function findEl(item, isUpgrade) {
+            if (!item) return null;
+            if (isUpgrade) {
+                let index = Game.UpgradesInStore.indexOf(item);
+                return index !== -1 ? document.getElementById('upgrade' + index) : null;
             }
-            return el;
+            return document.getElementById('product' + item.id);
         }
 
         function getItemData(item, isUpgrade) {
@@ -30,10 +28,19 @@ Game.registerMod("cookie-bot-auto", {
             let globalMult = Game.globalCpsMult || 1;
 
             if (isUpgrade) {
-                deltaCps = (item.power ? (Game.cookiesPsRaw * (item.power / 100)) : (Game.cookiesPsRaw * 0.01)) || 1;
+                if (item.buildingTie) {
+                    // Menghitung penambahan CPS jika upgrade melipatgandakan bangunan tertentu
+                    let b = item.buildingTie;
+                    deltaCps = (b.storedCps || 0) * b.amount * globalMult;
+                } else if (item.power) {
+                    deltaCps = (Game.cookiesPsRaw * (item.power / 100)) || 1;
+                } else {
+                    deltaCps = (Game.cookiesPsRaw * 0.01) || 1;
+                }
             } else {
                 deltaCps = (item.storedCps || (item.cps(item.amount + 1) - item.cps(item.amount))) * globalMult;
 
+                // Logika Bonus Milestone
                 let nextMilestone = MILESTONES.find(m => m > item.amount);
                 if (nextMilestone) {
                     let distance = nextMilestone - item.amount;
@@ -77,21 +84,16 @@ Game.registerMod("cookie-bot-auto", {
 
             // 4. Kumpulkan Opsi Bangunan & Upgrade
             let candidates = [];
-    
-            // Masukkan Bangunan
             for (let obj of Game.ObjectsById) {
                 if (obj) candidates.push(getItemData(obj, false));
             }
-
-            // Masukkan Upgrade yang tersedia di Store
             for (let up of Game.UpgradesInStore) {
-                // Abaikan upgrade tipe Switch atau Elder Covenant agar tidak beli sembarangan
                 if (up && up.pool !== 'toggle' && up.name !== 'Elder Covenant') {
                     candidates.push(getItemData(up, true));
                 }
             }
 
-            // 5. Best Target
+            // 5. Cari Target Utama (PP Terbaik)
             let bestTarget = null;
             let minPP = Infinity;
 
@@ -108,7 +110,7 @@ Game.registerMod("cookie-bot-auto", {
 
             if (!bestTarget) return;
 
-            // 6. Stepping-Stone
+            // 6. Logika Stepping-Stone
             let finalAction = bestTarget;
             let timeDirect = Math.max(0, bestTarget.cost - cookies) / cpsRaw;
             let bestTimeSaved = 0;
@@ -141,10 +143,10 @@ Game.registerMod("cookie-bot-auto", {
                 bankBuffer = cpsRaw * 6000;
             }
 
-            // 8. Buy
+            // 8. Eksekusi Pembelian & Highlight
             clear();
             let targetObj = finalAction.item;
-            let el = findEl(targetObj);
+            let el = findEl(targetObj, finalAction.isUpgrade);
 
             if (el) {
                 el.style.outline = '3px solid #00ff00';
@@ -167,7 +169,6 @@ Game.registerMod("cookie-bot-auto", {
 
         }, 200);
 
-        // Notifikasi saat mod berhasil aktif
-        Game.Notify('Cookie Bot', 'Bot otomatis aktif!', [16, 5]);
+        Game.Notify('Cookie Bot', 'Bot aktif & memperhitungkan Store!', [16, 5]);
     }
 });
