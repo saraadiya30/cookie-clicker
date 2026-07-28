@@ -75,10 +75,20 @@ Game.registerMod("cookie-bot-auto", {
                 if (cookies >= pledge.getPrice()) pledge.buy();
             }
 
-            // 4. Candidates
+            // 4. Kumpulkan Opsi Bangunan & Upgrade
             let candidates = [];
+    
+            // Masukkan Bangunan
             for (let obj of Game.ObjectsById) {
                 if (obj) candidates.push(getItemData(obj, false));
+            }
+
+            // Masukkan Upgrade yang tersedia di Store
+            for (let up of Game.UpgradesInStore) {
+                // Abaikan upgrade tipe Switch atau Elder Covenant agar tidak beli sembarangan
+                if (up && up.pool !== 'toggle' && up.name !== 'Elder Covenant') {
+                    candidates.push(getItemData(up, true));
+                }
             }
 
             // 5. Best Target
