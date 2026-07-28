@@ -23,35 +23,55 @@ Game.registerMod("cookie-bot-auto", {
         }
 
         function getItemData(item, isUpgrade) {
-            let cost = item.getPrice();
+            let cost = 0;
+            try {
+                cost = typeof item.getPrice === 'function' ? item.getPrice() : (item.price || 0);
+            } catch (e) {
+                cost = 0;
+            }
+
             let deltaCps = 0;
-            let globalMult = Game.globalCpsMult || 1;
 
             if (isUpgrade) {
-                if (item.buildingTie) {
-                    // Menghitung penambahan CPS jika upgrade melipatgandakan bangunan tertentu
-                    let b = item.buildingTie;
-                    deltaCps = (b.storedCps || 0) * b.amount * globalMult;
-                } else if (item.power) {
-                    deltaCps = (Game.cookiesPsRaw * (item.power / 100)) || 1;
-                } else {
-                    deltaCps = (Game.cookiesPsRaw * 0.01) || 1;
+                try {
+                    if (item.buildingTie) {
+                        // Upgrade khusus bangunan (melipatgandakan produksi)
+                        let b = item.buildingTie;
+                        let bCps = (typeof b.cps === 'function') ? b.cps(b) : 0;
+                        deltaCps = bCps * b.amount;
+                    } else if (item.power) {
+                        deltaCps = Game.cookiesPsRaw * (item.power / 100);
+                    } else {
+                        deltaCps = Game.cookiesPsRaw * 0.01;
+                    }
+                } catch (e) {
+                    deltaCps = Game.cookiesPsRaw * 0.01;
                 }
             } else {
-                deltaCps = (item.storedCps || (item.cps(item.amount + 1) - item.cps(item.amount))) * globalMult;
+                try {
+                    // API Cookie Clicker: item.cps(item) mengembalikan CPS murni per 1 unit
+                    deltaCps = (typeof item.cps === 'function') ? item.cps(item) : 0;
 
-                // Logika Bonus Milestone
-                let nextMilestone = MILESTONES.find(m => m > item.amount);
-                if (nextMilestone) {
-                    let distance = nextMilestone - item.amount;
-                    if (distance <= 5) {
-                        let bonusFactor = 1 + ((6 - distance) * 0.5);
-                        deltaCps *= bonusFactor;
+                    // Logika Bonus Milestone
+                    let nextMilestone = MILESTONES.find(m => m > item.amount);
+                    if (nextMilestone) {
+                        let distance = nextMilestone - item.amount;
+                        if (distance <= 5) {
+                            let bonusFactor = 1 + ((6 - distance) * 0.5);
+                            deltaCps *= bonusFactor;
+                        }
                     }
+                } catch (e) {
+                    deltaCps = 0;
                 }
             }
 
-            return { item, cost, deltaCps: Math.max(0.0001, deltaCps), isUpgrade };
+            // Proteksi mutlak agar deltaCps tidak pernah NaN atau <= 0
+            if (isNaN(deltaCps) || deltaCps <= 0) {
+                deltaCps = 0.0001;
+            }
+
+            return { item, cost, deltaCps, isUpgrade };
         }
 
         window.autoCookieInterval = setInterval(function() {
@@ -82,7 +102,7 @@ Game.registerMod("cookie-bot-auto", {
                 if (cookies >= pledge.getPrice()) pledge.buy();
             }
 
-            // 4. Kumpulkan Opsi Bangunan & Upgrade
+            // 4. Kumpulkan Kandidat (Bangunan & Store Upgrade)
             let candidates = [];
             for (let obj of Game.ObjectsById) {
                 if (obj) candidates.push(getItemData(obj, false));
@@ -93,7 +113,7 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // 5. Cari Target Utama (PP Terbaik)
+            // 5. Cari Target Utama (Payback Period Terbaik)
             let bestTarget = null;
             let minPP = Infinity;
 
@@ -135,7 +155,7 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // 7. Bank Buffer
+            // 7. Bank Buffer (Untuk Golden Cookie Lucky)
             let bankBuffer = 0;
             if (Game.Has('Get lucky')) {
                 bankBuffer = cpsRaw * 42000;
@@ -143,7 +163,7 @@ Game.registerMod("cookie-bot-auto", {
                 bankBuffer = cpsRaw * 6000;
             }
 
-            // 8. Eksekusi Pembelian & Highlight
+            // 8. Highlight dan Eksekusi Pembelian
             clear();
             let targetObj = finalAction.item;
             let el = findEl(targetObj, finalAction.isUpgrade);
@@ -169,6 +189,6 @@ Game.registerMod("cookie-bot-auto", {
 
         }, 200);
 
-        Game.Notify('Cookie Bot', 'Bot aktif & memperhitungkan Store!', [16, 5]);
+        Game.Notify('Cookie Bot', 'Bot aktif & siap jalan!', [16, 5]);
     }
 });
