@@ -1,9 +1,18 @@
 Game.registerMod("cookie-bot-auto", {
     init: function() {
-        if (window.autoCookieInterval) clearInterval(window.autoCookieInterval);
+        if (window.autoCookieClickInterval) clearInterval(window.autoCookieClickInterval);
+        if (window.autoCookieBuyInterval) clearInterval(window.autoCookieBuyInterval);
 
         let lastEl = null;
         const MILESTONES = [1, 10, 25, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600];
+
+        // cache 'Get lucky' / 'Lucky day' biar gak query Game.Has tiap tick
+        let hasLucky = { getLucky: false, luckyDay: false };
+        function refreshLuckyCache() {
+            hasLucky.getLucky = Game.Has('Get lucky');
+            hasLucky.luckyDay = Game.Has('Lucky day');
+        }
+        refreshLuckyCache();
 
         function clear() {
             if (lastEl) {
@@ -22,6 +31,7 @@ Game.registerMod("cookie-bot-auto", {
             return document.getElementById('product' + item.id);
         }
 
+        // return null kalau upgrade gak jelas efeknya ke CPS -> di-skip dari kandidat
         function getItemData(item, isUpgrade) {
             let cost = 0;
             try {
@@ -35,24 +45,22 @@ Game.registerMod("cookie-bot-auto", {
             if (isUpgrade) {
                 try {
                     if (item.buildingTie) {
-                        // Upgrade khusus bangunan (melipatgandakan produksi)
                         let b = item.buildingTie;
                         let bCps = (typeof b.cps === 'function') ? b.cps(b) : 0;
                         deltaCps = bCps * b.amount;
                     } else if (item.power) {
                         deltaCps = Game.cookiesPsRaw * (item.power / 100);
                     } else {
-                        deltaCps = Game.cookiesPsRaw * 0.01;
+                        // efek ke CPS gak diketahui -> jangan dipaksa masuk sistem payback
+                        return null;
                     }
                 } catch (e) {
-                    deltaCps = Game.cookiesPsRaw * 0.01;
+                    return null;
                 }
             } else {
                 try {
-                    // API Cookie Clicker: item.cps(item) mengembalikan CPS murni per 1 unit
                     deltaCps = (typeof item.cps === 'function') ? item.cps(item) : 0;
 
-                    // Logika Bonus Milestone
                     let nextMilestone = MILESTONES.find(m => m > item.amount);
                     if (nextMilestone) {
                         let distance = nextMilestone - item.amount;
@@ -66,7 +74,6 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // Proteksi mutlak agar deltaCps tidak pernah NaN atau <= 0
             if (isNaN(deltaCps) || deltaCps <= 0) {
                 deltaCps = 0.0001;
             }
@@ -74,12 +81,35 @@ Game.registerMod("cookie-bot-auto", {
             return { item, cost, deltaCps, isUpgrade };
         }
 
-        window.autoCookieInterval = setInterval(function() {
-            let cookies = Game.cookies;
-            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
+        // cast Force the Hand of Fate begitu mana penuh, langsung sikat golden cookie yang muncul
+        function tryCastForceHand() {
+            let wizardTower = Game.ObjectsById[7]; // Wizard Tower
+            if (!wizardTower || !wizardTower.minigame) return; // Grimoire belum ke-unlock
 
-            // 1. Klik Big Cookie & Shimmers
+            let grimoire = wizardTower.minigame;
+            let spell = grimoire.spells['hand of fate'];
+            if (!spell) return;
+
+            let cost = spell.costMin + grimoire.magicM * spell.costPercent;
+
+            if (grimoire.magic >= grimoire.magicM && grimoire.magic >= cost) {
+                grimoire.castSpell(spell);
+                Game.Notify('Cookie Bot', 'Force the Hand of Fate dicast!', [16, 5]);
+
+                if (Game.shimmers && Game.shimmers.length > 0) {
+                    for (let i = Game.shimmers.length - 1; i >= 0; i--) {
+                        if (Game.shimmers[i] && Game.shimmers[i].pop) {
+                            Game.shimmers[i].pop();
+                        }
+                    }
+                }
+            }
+        }
+
+        // === LOOP CEPAT: klik cookie + shimmer + sugar lump (respons tinggi) ===
+        window.autoCookieClickInterval = setInterval(function() {
             Game.ClickCookie();
+
             if (Game.shimmers && Game.shimmers.length > 0) {
                 for (let i = Game.shimmers.length - 1; i >= 0; i--) {
                     if (Game.shimmers[i] && Game.shimmers[i].pop) {
@@ -88,32 +118,45 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // 2. Sugar Lump
             if (Game.lumpT) {
                 let age = Date.now() - Game.lumpT;
                 if (age >= Game.lumpRipe && !Game.lumpClicking) {
                     Game.lumpClick();
                 }
             }
+        }, 100);
 
-            // 3. Elder Pledge
+        // === LOOP LAMBAT: keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
+        window.autoCookieBuyInterval = setInterval(function() {
+            let cookies = Game.cookies;
+            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
+
+            tryCastForceHand();
+
+            // Elder Pledge: beli langsung kalau affordable
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
             if (pledge && pledge.unlocked && !pledge.bought && Game.UpgradesInStore.includes(pledge)) {
                 if (cookies >= pledge.getPrice()) pledge.buy();
             }
 
-            // 4. Kumpulkan Kandidat (Bangunan & Store Upgrade)
+            // Kumpulkan kandidat (skip null = upgrade non-CPS yang gak jelas efeknya)
             let candidates = [];
             for (let obj of Game.ObjectsById) {
-                if (obj) candidates.push(getItemData(obj, false));
+                if (obj) {
+                    let d = getItemData(obj, false);
+                    if (d) candidates.push(d);
+                }
             }
             for (let up of Game.UpgradesInStore) {
                 if (up && up.pool !== 'toggle' && up.name !== 'Elder Covenant') {
-                    candidates.push(getItemData(up, true));
+                    let d = getItemData(up, true);
+                    if (d) candidates.push(d);
                 }
             }
 
-            // 5. Cari Target Utama (Payback Period Terbaik)
+            if (candidates.length === 0) return;
+
+            // Cari target utama (payback period terbaik)
             let bestTarget = null;
             let minPP = Infinity;
 
@@ -130,7 +173,7 @@ Game.registerMod("cookie-bot-auto", {
 
             if (!bestTarget) return;
 
-            // 6. Logika Stepping-Stone
+            // Logika stepping-stone
             let finalAction = bestTarget;
             let timeDirect = Math.max(0, bestTarget.cost - cookies) / cpsRaw;
             let bestTimeSaved = 0;
@@ -155,25 +198,28 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // 7. Bank Buffer (Untuk Golden Cookie Lucky)
+            // Bank buffer (pakai cache, bukan query tiap tick)
             let bankBuffer = 0;
-            if (Game.Has('Get lucky')) {
+            if (hasLucky.getLucky) {
                 bankBuffer = cpsRaw * 42000;
-            } else if (Game.Has('Lucky day')) {
+            } else if (hasLucky.luckyDay) {
                 bankBuffer = cpsRaw * 6000;
             }
 
-            // 8. Highlight dan Eksekusi Pembelian
-            clear();
+            // Highlight (cuma di-rewrite kalau target beda dari tick sebelumnya)
             let targetObj = finalAction.item;
             let el = findEl(targetObj, finalAction.isUpgrade);
 
-            if (el) {
-                el.style.outline = '3px solid #00ff00';
-                el.style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
-                lastEl = el;
+            if (el !== lastEl) {
+                clear();
+                if (el) {
+                    el.style.outline = '3px solid #00ff00';
+                    el.style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
+                    lastEl = el;
+                }
             }
 
+            // Eksekusi beli
             let effectiveCookies = cookies - bankBuffer;
 
             if (cookies >= finalAction.cost) {
@@ -183,11 +229,11 @@ Game.registerMod("cookie-bot-auto", {
                     } else {
                         finalAction.item.buy(1);
                     }
+                    refreshLuckyCache();
                     clear();
                 }
             }
-
-        }, 200);
+        }, 750);
 
         Game.Notify('Cookie Bot', 'Bot aktif & siap jalan!', [16, 5]);
     }
