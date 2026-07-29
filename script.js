@@ -83,26 +83,28 @@ Game.registerMod("cookie-bot-auto", {
 
         // cast Force the Hand of Fate begitu mana penuh, langsung sikat golden cookie yang muncul
         function tryCastForceHand() {
-            let wizardTower = Game.ObjectsById[7]; // Wizard Tower
-            if (!wizardTower || !wizardTower.minigame) return; // Grimoire belum ke-unlock
-
+            let wizardTower = Game.ObjectsById[7];
+            if (!wizardTower || !wizardTower.minigame) {
+                console.log('[CookieBot] Grimoire belum unlock atau Wizard Tower belum level 1');
+                return;
+            }
+        
             let grimoire = wizardTower.minigame;
             let spell = grimoire.spells['hand of fate'];
-            if (!spell) return;
-
+            if (!spell) {
+                console.log('[CookieBot] Spell "hand of fate" gak ketemu di grimoire.spells:', Object.keys(grimoire.spells));
+                return;
+            }
+        
             let cost = spell.costMin + grimoire.magicM * spell.costPercent;
-
+            console.log('[CookieBot] magic:', grimoire.magic, '/ magicM:', grimoire.magicM, '/ cost:', cost);
+        
             if (grimoire.magic >= grimoire.magicM && grimoire.magic >= cost) {
                 grimoire.castSpell(spell);
                 Game.Notify('Cookie Bot', 'Force the Hand of Fate dicast!', [16, 5]);
-
-                if (Game.shimmers && Game.shimmers.length > 0) {
-                    for (let i = Game.shimmers.length - 1; i >= 0; i--) {
-                        if (Game.shimmers[i] && Game.shimmers[i].pop) {
-                            Game.shimmers[i].pop();
-                        }
-                    }
-                }
+                // ...
+            } else {
+                console.log('[CookieBot] Syarat belum kepenuhi, skip cast tick ini');
             }
         }
 
