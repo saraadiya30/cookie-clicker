@@ -106,6 +106,30 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
+        // auto-trade stock market: beli kalau di bawah resting value & rising, jual kalau di atas resting value & falling
+        function tryTradeStocks() {
+            let bank = Game.Objects['Bank'];
+            if (!bank || !bank.minigame) return; // Stock Market belum ke-unlock
+
+            let market = bank.minigame;
+
+            for (let i = 0; i < market.goodsById.length; i++) {
+                let good = market.goodsById[i];
+                let resting = market.getRestingVal(good.id);
+
+                // Jual dulu: harga di atas resting value & lagi falling (mode 2/4), masih punya stock
+                if (good.stock > 0 && good.val > resting && (good.mode === 2 || good.mode === 4)) {
+                    market.sellGood(good.id, 10000);
+                    continue; // last jadi 2 abis jual, gak bisa langsung beli di tick yang sama
+                }
+
+                // Beli: harga di bawah resting value & lagi rising (mode 1/3)
+                if (good.val < resting && (good.mode === 1 || good.mode === 3)) {
+                    market.buyGood(good.id, 10000);
+                }
+            }
+        }
+
         // === LOOP CEPAT: klik cookie + shimmer + sugar lump (respons tinggi) ===
         window.autoCookieClickInterval = setInterval(function() {
             Game.ClickCookie();
@@ -132,6 +156,7 @@ Game.registerMod("cookie-bot-auto", {
             let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
 
             tryCastForceHand();
+            tryTradeStocks();
 
             // Elder Pledge: beli langsung kalau affordable
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
