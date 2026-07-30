@@ -153,7 +153,8 @@ Game.registerMod("cookie-bot-auto", {
         // === LOOP LAMBAT: keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
         window.autoCookieBuyInterval = setInterval(function() {
             let cookies = Game.cookies;
-            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
+            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1; // basis efisiensi (deltaCps), konsisten antar buff
+            let cpsActual = Game.cookiesPs || cpsRaw; // basis waktu nunggu, refleksiin buff CPS yang lagi aktif (Frenzy dkk)
 
             tryCastForceHand();
             tryTradeStocks();
@@ -186,7 +187,7 @@ Game.registerMod("cookie-bot-auto", {
             let minPP = Infinity;
 
             for (let cand of candidates) {
-                let timeToSave = Math.max(0, cand.cost - cookies) / cpsRaw;
+                let timeToSave = Math.max(0, cand.cost - cookies) / cpsActual;
                 let payback = cand.cost / cand.deltaCps;
                 let pp = timeToSave + payback;
 
@@ -200,18 +201,18 @@ Game.registerMod("cookie-bot-auto", {
 
             // Logika stepping-stone
             let finalAction = bestTarget;
-            let timeDirect = Math.max(0, bestTarget.cost - cookies) / cpsRaw;
+            let timeDirect = Math.max(0, bestTarget.cost - cookies) / cpsActual;
             let bestTimeSaved = 0;
 
             for (let cand of candidates) {
                 if (cand.item === bestTarget.item) continue;
                 if (cand.cost >= bestTarget.cost) continue;
 
-                let timeS = Math.max(0, cand.cost - cookies) / cpsRaw;
+                let timeS = Math.max(0, cand.cost - cookies) / cpsActual;
                 if (timeS >= timeDirect) continue;
 
                 let newCps = cpsRaw + cand.deltaCps;
-                let cookiesAfterS = Math.max(0, cookies + (timeS * cpsRaw) - cand.cost);
+                let cookiesAfterS = Math.max(0, cookies + (timeS * cpsActual) - cand.cost);
                 let timeTargetAfterS = Math.max(0, bestTarget.cost - cookiesAfterS) / newCps;
 
                 let totalTimeWithS = timeS + timeTargetAfterS;
