@@ -22,6 +22,24 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
+        // sistem highlight multi-kategori: tiap jenis keputusan bot punya penanda visual sendiri,
+        // gak saling timpa satu sama lain, dan persist (gak auto-clear) biar user bisa liat riwayat terakhir
+        let categoryHighlights = {}; // { kategori: elemen yang lagi di-highlight }
+        function setCategoryHighlight(category, el, color) {
+            if (categoryHighlights[category] === el) return; // gak ada perubahan, skip
+            if (categoryHighlights[category]) {
+                categoryHighlights[category].style.boxShadow = '';
+                categoryHighlights[category].style.backgroundColor = '';
+            }
+            if (el) {
+                el.style.boxShadow = 'inset 0 0 0 3px ' + color;
+                el.style.backgroundColor = color + '33'; // versi transparan buat background
+                categoryHighlights[category] = el;
+            } else {
+                categoryHighlights[category] = null;
+            }
+        }
+
         function findEl(item, isUpgrade) {
             if (!item) return null;
             if (isUpgrade) {
@@ -95,6 +113,7 @@ Game.registerMod("cookie-bot-auto", {
             if (grimoire.magic >= grimoire.magicM && grimoire.magic >= cost) {
                 grimoire.castSpell(spell);
                 Game.Notify('Cookie Bot', 'Force the Hand of Fate dicast!', [16, 5]);
+                setCategoryHighlight('forceHand', document.getElementById('grimoireSpell' + spell.id), '#ffcc00');
 
                 if (Game.shimmers && Game.shimmers.length > 0) {
                     for (let i = Game.shimmers.length - 1; i >= 0; i--) {
@@ -121,6 +140,7 @@ Game.registerMod("cookie-bot-auto", {
                 // Jual dulu: harga di atas resting value & lagi falling (mode 2/4), masih punya stock
                 if (good.stock > 0 && good.val > resting && (good.mode === 2 || good.mode === 4)) {
                     market.sellGood(good.id, 10000);
+                    setCategoryHighlight('stockMarket', document.getElementById('bankGood-' + good.id), '#ff3366');
                     continue; // last jadi 2 abis jual, gak bisa langsung beli di tick yang sama
                 }
 
@@ -135,6 +155,7 @@ Game.registerMod("cookie-bot-auto", {
 
                     if (n > 0) {
                         market.buyGood(good.id, n);
+                        setCategoryHighlight('stockMarket', document.getElementById('bankGood-' + good.id), '#33ccff');
                     }
                 }
             }
@@ -146,10 +167,12 @@ Game.registerMod("cookie-bot-auto", {
         const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
         const GODZAMOK_COOLDOWN_MS = 5 * 60 * 1000; // 5 menit, biar gak sell-rebuy bolak-balik tiap tick
 
-        function hasClickBuffActive() {
+        // Frenzy biasa (CPS buff) juga tetep untung dipakai buat trigger Godzamok, walau gak semaksimal Click Frenzy --
+        // soalnya nilai klik ikut keitung dari % CPS saat itu, jadi tetep numpuk di atas nilai yang lebih tinggi
+        function hasAnyProductionBuffActive() {
             for (let key in Game.buffs) {
                 let buff = Game.buffs[key];
-                if (buff && buff.multClick && buff.multClick > 1) return true;
+                if (buff && ((buff.multClick && buff.multClick > 1) || (buff.multCpS && buff.multCpS > 1))) return true;
             }
             return false;
         }
@@ -158,7 +181,7 @@ Game.registerMod("cookie-bot-auto", {
             if (!Game.hasGod) return;
             let godzamokLvl = Game.hasGod('ruin');
             if (!godzamokLvl) return; // Godzamok gak lagi di-slot
-            if (!hasClickBuffActive()) return; // cuma jual pas ada buff klik (Click Frenzy dkk) biar numpuk multiplicative
+            if (!hasAnyProductionBuffActive()) return; // Click Frenzy prioritas, Frenzy biasa jadi fallback -- tetep untung, gak rugi
 
             let totalCps = Game.cookiesPsRaw || 0;
             if (totalCps <= 0) return;
@@ -182,6 +205,7 @@ Game.registerMod("cookie-bot-auto", {
                     godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
                     obj.sell(-1); // jual semua unit building ini sekaligus
                     godzamokCooldown[obj.id] = now + GODZAMOK_COOLDOWN_MS;
+                    setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
                 }
             }
         }
@@ -200,6 +224,7 @@ Game.registerMod("cookie-bot-auto", {
                 }
 
                 let needed = target - obj.amount;
+                let boughtAny = false;
                 for (let i = 0; i < needed; i++) {
                     let price;
                     try {
@@ -209,9 +234,14 @@ Game.registerMod("cookie-bot-auto", {
                     }
                     if (Game.cookies - bankBuffer >= price) {
                         obj.buy(1);
+                        boughtAny = true;
                     } else {
                         break; // kena buffer / cookies gak cukup, stop buat item ini tick ini
                     }
+                }
+
+                if (boughtAny) {
+                    setCategoryHighlight('priorityRebuy', findEl(obj, false), '#00ccff');
                 }
             }
         }
@@ -274,6 +304,7 @@ Game.registerMod("cookie-bot-auto", {
                 let obj = Game.ObjectsById[id];
                 if (obj && obj.amount > 0 && obj.level < 1 && Game.lumps >= obj.level + 1) {
                     obj.levelUp();
+                    setCategoryHighlight('sugarLump', findEl(obj, false), '#cc66ff');
                     return; // 1 lump per tick cukup, biar gak nge-drain semua lump sekaligus
                 }
             }
@@ -297,6 +328,37 @@ Game.registerMod("cookie-bot-auto", {
 
             if (bestObj && Game.lumps >= bestObj.level + 1) {
                 bestObj.levelUp();
+                setCategoryHighlight('sugarLump', findEl(bestObj, false), '#cc66ff');
+            }
+        }
+
+        // building yang harganya di bawah 1% dari CPS base (bukan yang lagi kena buff) -> beli langsung,
+        // gak perlu nunggu menang di ranking payback-period, soalnya biayanya gak signifikan
+        const TRIVIAL_BUY_RATIO = 0.01; // 1% dari cpsRaw
+        function tryBuyTrivialBuildings(bankBuffer, cpsRaw) {
+            for (let obj of Game.ObjectsById) {
+                if (!obj) continue;
+
+                let safety = 0; // guard biar gak infinite loop kalau ada kondisi aneh
+                while (safety < 50) {
+                    safety++;
+                    let price;
+                    try {
+                        price = obj.getPrice();
+                    } catch (e) {
+                        break;
+                    }
+
+                    let trivialCost = cpsRaw * TRIVIAL_BUY_RATIO;
+                    if (price > trivialCost) break; // udah gak trivial lagi, stop
+
+                    if (Game.cookies - bankBuffer >= price) {
+                        obj.buy(1);
+                        setCategoryHighlight('trivialBuy', findEl(obj, false), '#33ff99');
+                    } else {
+                        break; // kena buffer / cookies gak cukup
+                    }
+                }
             }
         }
 
@@ -339,6 +401,7 @@ Game.registerMod("cookie-bot-auto", {
             tryGodzamokCombo();
             tryPopWrinklers();
             trySpendSugarLumps();
+            tryBuyTrivialBuildings(bankBuffer, cpsRaw);
             tryPriorityRebuy(bankBuffer);
             tryOpportunisticUpgrades(bankBuffer);
             tryHeavenlyUpgrades();
@@ -353,7 +416,10 @@ Game.registerMod("cookie-bot-auto", {
             // Elder Pledge: beli langsung kalau affordable (hormatin bankBuffer)
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
             if (pledge && pledge.unlocked && !pledge.bought && Game.UpgradesInStore.includes(pledge)) {
-                if (cookies - bankBuffer >= pledge.getPrice()) pledge.buy();
+                if (cookies - bankBuffer >= pledge.getPrice()) {
+                    pledge.buy();
+                    setCategoryHighlight('elderPledge', findEl(pledge, true), '#ffff00');
+                }
             }
 
             // Kumpulkan kandidat (skip null = upgrade non-CPS yang gak jelas efeknya)
