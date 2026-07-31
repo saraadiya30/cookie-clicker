@@ -162,10 +162,8 @@ Game.registerMod("cookie-bot-auto", {
         }
 
         // Godzamok combo: jual building yang kontribusinya <1% dari total CPS buat trigger buff klik (Devastation)
-        let godzamokCooldown = {}; // { buildingId: timestamp boleh dicek lagi }
         let godzamokPrevAmount = {}; // { buildingId: jumlah sebelum dijual, buat prioritas rebuy }
         const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
-        const GODZAMOK_COOLDOWN_MS = 5 * 60 * 1000; // 5 menit, biar gak sell-rebuy bolak-balik tiap tick
 
         // Frenzy biasa (CPS buff) juga tetep untung dipakai buat trigger Godzamok, walau gak semaksimal Click Frenzy --
         // soalnya nilai klik ikut keitung dari % CPS saat itu, jadi tetep numpuk di atas nilai yang lebih tinggi
@@ -177,6 +175,45 @@ Game.registerMod("cookie-bot-auto", {
             return false;
         }
 
+        // estimasi untung-rugi jual building buat combo Godzamok, sebelum beneran dieksekusi
+        function estimateGodzamokEV(obj, godzamokLvl) {
+            let sold = obj.amount;
+            if (sold <= 0) return { profitable: false };
+
+            // sisi untung: kenaikan nilai klik x sisa waktu Devastation x rate klik bot (10/detik dari interval 100ms)
+            let clickBefore = Game.mouseCps ? Game.mouseCps() : 0;
+            let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
+            let deltaMultClick = sold * rate;
+
+            let existingDevastation = Game.hasBuff ? Game.hasBuff('Devastation') : null;
+            let oldFactor = existingDevastation ? existingDevastation.multClick : 1;
+            let newFactor = oldFactor + deltaMultClick;
+            let clickAfter = clickBefore * (newFactor / oldFactor);
+            let deltaClickValue = clickAfter - clickBefore;
+
+            let remainingTime = existingDevastation ? existingDevastation.time : 10; // buff baru mulai dari 10 detik
+            let clicksRemaining = remainingTime * 10;
+
+            let expectedGain = deltaClickValue * clicksRemaining;
+
+            // sisi rugi: rebuyCost dihitung persis pakai formula asli game (basePrice, priceIncrease, free, modifyBuildingPrice)
+            let growthRatio = Game.priceIncrease || 1.15;
+            let free = obj.free || 0;
+            let rebuyCost = 0;
+            for (let k = 0; k < sold; k++) {
+                let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, k - free));
+                if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
+                rebuyCost += Math.ceil(p);
+            }
+
+            let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
+            const SAFETY_MARGIN = 0.05; // anggap refund 5% lebih kecil dari aktual, biar netCost gak underestimate
+            let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
+            let netCost = rebuyCost * (1 - safeSellMult); // yang beneran ilang abis siklus jual-beli (dengan buffer aman)
+
+            return { profitable: expectedGain > netCost, expectedGain, netCost };
+        }
+
         function tryGodzamokCombo() {
             if (!Game.hasGod) return;
             let godzamokLvl = Game.hasGod('ruin');
@@ -186,12 +223,9 @@ Game.registerMod("cookie-bot-auto", {
             let totalCps = Game.cookiesPsRaw || 0;
             if (totalCps <= 0) return;
 
-            let now = Date.now();
-
             for (let obj of Game.ObjectsById) {
                 if (!obj || obj.amount <= 0) continue;
                 if (MINIGAME_BUILDING_IDS.includes(obj.id)) continue; // jangan jual habis building minigame, biar akses Grimoire/Stock Market/Pantheon gak keputus
-                if (godzamokCooldown[obj.id] && now < godzamokCooldown[obj.id]) continue;
 
                 let buildingCps = 0;
                 try {
@@ -202,9 +236,11 @@ Game.registerMod("cookie-bot-auto", {
 
                 let ratio = buildingCps / totalCps;
                 if (ratio < GODZAMOK_THRESHOLD) {
+                    let ev = estimateGodzamokEV(obj, godzamokLvl);
+                    if (!ev.profitable) continue; // estimasi rugi, skip
+
                     godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
                     obj.sell(-1); // jual semua unit building ini sekaligus
-                    godzamokCooldown[obj.id] = now + GODZAMOK_COOLDOWN_MS;
                     setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
                 }
             }
