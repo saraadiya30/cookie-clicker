@@ -161,127 +161,6 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
-        // Godzamok combo: jual building yang kontribusinya <1% dari total CPS buat trigger buff klik (Devastation)
-        let godzamokPrevAmount = {}; // { buildingId: jumlah sebelum dijual, buat prioritas rebuy }
-        const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
-
-        // Frenzy biasa (CPS buff) juga tetep untung dipakai buat trigger Godzamok, walau gak semaksimal Click Frenzy --
-        // soalnya nilai klik ikut keitung dari % CPS saat itu, jadi tetep numpuk di atas nilai yang lebih tinggi
-        function hasAnyProductionBuffActive() {
-            for (let key in Game.buffs) {
-                let buff = Game.buffs[key];
-                if (buff && ((buff.multClick && buff.multClick > 1) || (buff.multCpS && buff.multCpS > 1))) return true;
-            }
-            return false;
-        }
-
-        // estimasi untung-rugi jual building buat combo Godzamok, sebelum beneran dieksekusi
-        function estimateGodzamokEV(obj, godzamokLvl) {
-            let sold = obj.amount;
-            if (sold <= 0) return { profitable: false };
-
-            // sisi untung: kenaikan nilai klik x sisa waktu Devastation x rate klik bot (10/detik dari interval 100ms)
-            let clickBefore = Game.mouseCps ? Game.mouseCps() : 0;
-            let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
-            let deltaMultClick = sold * rate;
-
-            let existingDevastation = Game.hasBuff ? Game.hasBuff('Devastation') : null;
-            let oldFactor = existingDevastation ? existingDevastation.multClick : 1;
-            let newFactor = oldFactor + deltaMultClick;
-            let clickAfter = clickBefore * (newFactor / oldFactor);
-            let deltaClickValue = clickAfter - clickBefore;
-
-            let remainingTime = existingDevastation ? existingDevastation.time : 10; // buff baru mulai dari 10 detik
-            let clicksRemaining = remainingTime * 10;
-
-            let expectedGain = deltaClickValue * clicksRemaining;
-
-            // sisi rugi: rebuyCost dihitung persis pakai formula asli game (basePrice, priceIncrease, free, modifyBuildingPrice)
-            let growthRatio = Game.priceIncrease || 1.15;
-            let free = obj.free || 0;
-            let rebuyCost = 0;
-            for (let k = 0; k < sold; k++) {
-                let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, k - free));
-                if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
-                rebuyCost += Math.ceil(p);
-            }
-
-            let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
-            const SAFETY_MARGIN = 0.05; // anggap refund 5% lebih kecil dari aktual, biar netCost gak underestimate
-            let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
-            let netCost = rebuyCost * (1 - safeSellMult); // yang beneran ilang abis siklus jual-beli (dengan buffer aman)
-
-            return { profitable: expectedGain > netCost, expectedGain, netCost };
-        }
-
-        function tryGodzamokCombo() {
-            if (!Game.hasGod) return;
-            let godzamokLvl = Game.hasGod('ruin');
-            if (!godzamokLvl) return; // Godzamok gak lagi di-slot
-            if (!hasAnyProductionBuffActive()) return; // Click Frenzy prioritas, Frenzy biasa jadi fallback -- tetep untung, gak rugi
-
-            let totalCps = Game.cookiesPsRaw || 0;
-            if (totalCps <= 0) return;
-
-            for (let obj of Game.ObjectsById) {
-                if (!obj || obj.amount <= 0) continue;
-                if (MINIGAME_BUILDING_IDS.includes(obj.id)) continue; // jangan jual habis building minigame, biar akses Grimoire/Stock Market/Pantheon gak keputus
-
-                let buildingCps = 0;
-                try {
-                    buildingCps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
-                } catch (e) {
-                    buildingCps = 0;
-                }
-
-                let ratio = buildingCps / totalCps;
-                if (ratio < GODZAMOK_THRESHOLD) {
-                    let ev = estimateGodzamokEV(obj, godzamokLvl);
-                    if (!ev.profitable) continue; // estimasi rugi, skip
-
-                    godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
-                    obj.sell(-1); // jual semua unit building ini sekaligus
-                    setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
-                }
-            }
-        }
-
-        // beli balik bulk (bukan 1-1 secara internal) building bekas Godzamok, sampai balik ke jumlah semula
-        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
-        function tryPriorityRebuy(bankBuffer) {
-            for (let id in godzamokPrevAmount) {
-                let obj = Game.ObjectsById[id];
-                if (!obj) continue;
-
-                let target = godzamokPrevAmount[id];
-                if (obj.amount >= target) {
-                    delete godzamokPrevAmount[id]; // udah balik penuh, lepas dari prioritas
-                    continue;
-                }
-
-                let needed = target - obj.amount;
-                let boughtAny = false;
-                for (let i = 0; i < needed; i++) {
-                    let price;
-                    try {
-                        price = obj.getPrice();
-                    } catch (e) {
-                        break;
-                    }
-                    if (Game.cookies - bankBuffer >= price) {
-                        obj.buy(1);
-                        boughtAny = true;
-                    } else {
-                        break; // kena buffer / cookies gak cukup, stop buat item ini tick ini
-                    }
-                }
-
-                if (boughtAny) {
-                    setCategoryHighlight('priorityRebuy', findEl(obj, false), '#00ccff');
-                }
-            }
-        }
-
         // upgrade yang efeknya gak bisa dihitung presisi (Kitten dkk) -> beli opportunistic
         // asal affordable & murah relatif ke bank cookies, bukan ranking payback-period
         // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
@@ -434,16 +313,13 @@ Game.registerMod("cookie-bot-auto", {
 
             tryCastForceHand();
             tryTradeStocks(bankBuffer);
-            tryGodzamokCombo();
             tryPopWrinklers();
             trySpendSugarLumps();
             tryBuyTrivialBuildings(bankBuffer, cpsRaw);
-            tryPriorityRebuy(bankBuffer);
             tryOpportunisticUpgrades(bankBuffer);
             tryHeavenlyUpgrades();
 
             // refresh semua basis kalkulasi, soalnya fungsi-fungsi di atas bisa langsung ngubah cookies/CPS beneran
-            // (Godzamok jual -> CPS turun, priority rebuy/level up -> CPS naik, dll)
             cookies = Game.cookies;
             cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
             cpsActual = Game.cookiesPs || cpsRaw;
