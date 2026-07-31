@@ -130,6 +130,49 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
+        // Godzamok combo: jual building yang kontribusinya <1% dari total CPS buat trigger buff klik (Devastation)
+        let godzamokCooldown = {}; // { buildingId: timestamp boleh dicek lagi }
+        const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
+        const GODZAMOK_COOLDOWN_MS = 5 * 60 * 1000; // 5 menit, biar gak sell-rebuy bolak-balik tiap tick
+
+        function hasClickBuffActive() {
+            for (let key in Game.buffs) {
+                let buff = Game.buffs[key];
+                if (buff && buff.multClick && buff.multClick > 1) return true;
+            }
+            return false;
+        }
+
+        function tryGodzamokCombo() {
+            if (!Game.hasGod) return;
+            let godzamokLvl = Game.hasGod('ruin');
+            if (!godzamokLvl) return; // Godzamok gak lagi di-slot
+            if (!hasClickBuffActive()) return; // cuma jual pas ada buff klik (Click Frenzy dkk) biar numpuk multiplicative
+
+            let totalCps = Game.cookiesPsRaw || 0;
+            if (totalCps <= 0) return;
+
+            let now = Date.now();
+
+            for (let obj of Game.ObjectsById) {
+                if (!obj || obj.amount <= 0) continue;
+                if (godzamokCooldown[obj.id] && now < godzamokCooldown[obj.id]) continue;
+
+                let buildingCps = 0;
+                try {
+                    buildingCps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
+                } catch (e) {
+                    buildingCps = 0;
+                }
+
+                let ratio = buildingCps / totalCps;
+                if (ratio < GODZAMOK_THRESHOLD) {
+                    obj.sell(-1); // jual semua unit building ini sekaligus
+                    godzamokCooldown[obj.id] = now + GODZAMOK_COOLDOWN_MS;
+                }
+            }
+        }
+
         // === LOOP CEPAT: klik cookie + shimmer + sugar lump (respons tinggi) ===
         window.autoCookieClickInterval = setInterval(function() {
             Game.ClickCookie();
@@ -158,6 +201,7 @@ Game.registerMod("cookie-bot-auto", {
 
             tryCastForceHand();
             tryTradeStocks();
+            tryGodzamokCombo();
 
             // Elder Pledge: beli langsung kalau affordable
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
