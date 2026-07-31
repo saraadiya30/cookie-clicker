@@ -107,7 +107,8 @@ Game.registerMod("cookie-bot-auto", {
         }
 
         // auto-trade stock market: beli kalau di bawah resting value & rising, jual kalau di atas resting value & falling
-        function tryTradeStocks() {
+        // -- hormatin bankBuffer pas beli, gak nyolong reserve buat Lucky combo
+        function tryTradeStocks(bankBuffer) {
             let bank = Game.Objects['Bank'];
             if (!bank || !bank.minigame) return; // Stock Market belum ke-unlock
 
@@ -125,13 +126,23 @@ Game.registerMod("cookie-bot-auto", {
 
                 // Beli: harga di bawah resting value & lagi rising (mode 1/3)
                 if (good.val < resting && (good.mode === 1 || good.mode === 3)) {
-                    market.buyGood(good.id, 10000);
+                    // hitung manual (bukan pakai sentinel 10000) biar budgetnya nyisain bankBuffer
+                    let costInS = market.getGoodPrice(good);
+                    let overhead = 1 + 0.01 * (20 * Math.pow(0.95, market.brokers));
+                    let costPerUnit = Game.cookiesPsRawHighest * costInS * overhead;
+                    let budget = Math.max(0, Game.cookies - bankBuffer);
+                    let n = costPerUnit > 0 ? Math.floor(budget / costPerUnit) : 0;
+
+                    if (n > 0) {
+                        market.buyGood(good.id, n);
+                    }
                 }
             }
         }
 
         // Godzamok combo: jual building yang kontribusinya <1% dari total CPS buat trigger buff klik (Devastation)
         let godzamokCooldown = {}; // { buildingId: timestamp boleh dicek lagi }
+        let godzamokPrevAmount = {}; // { buildingId: jumlah sebelum dijual, buat prioritas rebuy }
         const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
         const GODZAMOK_COOLDOWN_MS = 5 * 60 * 1000; // 5 menit, biar gak sell-rebuy bolak-balik tiap tick
 
@@ -156,6 +167,7 @@ Game.registerMod("cookie-bot-auto", {
 
             for (let obj of Game.ObjectsById) {
                 if (!obj || obj.amount <= 0) continue;
+                if (MINIGAME_BUILDING_IDS.includes(obj.id)) continue; // jangan jual habis building minigame, biar akses Grimoire/Stock Market/Pantheon gak keputus
                 if (godzamokCooldown[obj.id] && now < godzamokCooldown[obj.id]) continue;
 
                 let buildingCps = 0;
@@ -167,9 +179,124 @@ Game.registerMod("cookie-bot-auto", {
 
                 let ratio = buildingCps / totalCps;
                 if (ratio < GODZAMOK_THRESHOLD) {
+                    godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
                     obj.sell(-1); // jual semua unit building ini sekaligus
                     godzamokCooldown[obj.id] = now + GODZAMOK_COOLDOWN_MS;
                 }
+            }
+        }
+
+        // beli balik bulk (bukan 1-1 secara internal) building bekas Godzamok, sampai balik ke jumlah semula
+        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
+        function tryPriorityRebuy(bankBuffer) {
+            for (let id in godzamokPrevAmount) {
+                let obj = Game.ObjectsById[id];
+                if (!obj) continue;
+
+                let target = godzamokPrevAmount[id];
+                if (obj.amount >= target) {
+                    delete godzamokPrevAmount[id]; // udah balik penuh, lepas dari prioritas
+                    continue;
+                }
+
+                let needed = target - obj.amount;
+                for (let i = 0; i < needed; i++) {
+                    let price;
+                    try {
+                        price = obj.getPrice();
+                    } catch (e) {
+                        break;
+                    }
+                    if (Game.cookies - bankBuffer >= price) {
+                        obj.buy(1);
+                    } else {
+                        break; // kena buffer / cookies gak cukup, stop buat item ini tick ini
+                    }
+                }
+            }
+        }
+
+        // upgrade yang efeknya gak bisa dihitung presisi (Kitten dkk) -> beli opportunistic
+        // asal affordable & murah relatif ke bank cookies, bukan ranking payback-period
+        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
+        const OPPORTUNISTIC_MAX_COST_RATIO = 0.05; // maks 5% dari cookies sekarang
+        function tryOpportunisticUpgrades(bankBuffer) {
+            for (let up of Game.UpgradesInStore) {
+                if (!up || up.pool === 'toggle' || up.name === 'Elder Covenant') continue;
+                if (up.buildingTie || up.power) continue; // ini udah dihandle sistem payback biasa
+
+                let cost = 0;
+                try {
+                    cost = typeof up.getPrice === 'function' ? up.getPrice() : (up.price || 0);
+                } catch (e) {
+                    cost = 0;
+                }
+
+                if (cost > 0 && Game.cookies - bankBuffer >= cost && cost <= Game.cookies * OPPORTUNISTIC_MAX_COST_RATIO) {
+                    up.buy();
+                }
+            }
+        }
+
+        // placeholder buat ascension & heavenly upgrades -- BELUM AKTIF.
+        // begitu kamu udah pernah ascend, kita verifikasi struktur Game.UpgradesInStore
+        // versi heavenly/prestige bareng-bareng dulu, baru diisi logic pemilihan/pembeliannya di sini.
+        function tryHeavenlyUpgrades() {
+            return; // TODO: isi setelah verifikasi API pasca-ascend pertama
+        }
+
+        // auto-pop wrinkler: tunggu Frenzy abis dulu (biar akumulasi 7x maksimal), baru pop begitu penuh
+        const WRINKLER_MAX = 10; // naikin ke 14 kalau udah punya Elder Spice + Dragon Guts
+        function tryPopWrinklers() {
+            if (typeof Game.CollectWrinklers !== 'function') return;
+            if (!Game.wrinklers) return;
+
+            let activeWrinklers = Game.wrinklers.filter(w => w && w.phase > 0);
+            if (activeWrinklers.length === 0) return;
+
+            // jangan pop kalau Frenzy masih jalan, biar akumulasinya kepakai penuh
+            if (Game.hasBuff && Game.hasBuff('Frenzy')) return;
+
+            if (activeWrinklers.length >= WRINKLER_MAX) {
+                Game.CollectWrinklers();
+            }
+        }
+
+        // alokasi sugar lump: unlock minigame dulu (Farm/Bank/Temple/Wizard Tower ke level 1),
+        // abis itu level up building kontribusi CPS tertinggi saat ini
+        const MINIGAME_BUILDING_IDS = [2, 5, 6, 7]; // Farm, Bank, Temple, Wizard Tower
+        function trySpendSugarLumps() {
+            if (typeof Game.spendLump !== 'function') return;
+            if (!Game.lumps || Game.lumps < 1) return;
+
+            // prioritas 1: unlock minigame (level 1)
+            for (let id of MINIGAME_BUILDING_IDS) {
+                let obj = Game.ObjectsById[id];
+                if (obj && obj.amount > 0 && obj.level < 1 && Game.lumps >= obj.level + 1) {
+                    obj.levelUp();
+                    return; // 1 lump per tick cukup, biar gak nge-drain semua lump sekaligus
+                }
+            }
+
+            // prioritas 2: level up building dengan kontribusi CPS tertinggi
+            let bestObj = null;
+            let bestCps = 0;
+            for (let obj of Game.ObjectsById) {
+                if (!obj || obj.amount <= 0) continue;
+                let cps = 0;
+                try {
+                    cps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
+                } catch (e) {
+                    cps = 0;
+                }
+                if (cps > bestCps) {
+                    bestCps = cps;
+                    bestObj = obj;
+                }
+            }
+
+            if (bestObj && Game.lumps >= bestObj.level + 1) {
+                bestObj.levelUp();
             }
         }
 
@@ -199,14 +326,34 @@ Game.registerMod("cookie-bot-auto", {
             let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1; // basis efisiensi (deltaCps), konsisten antar buff
             let cpsActual = Game.cookiesPs || cpsRaw; // basis waktu nunggu, refleksiin buff CPS yang lagi aktif (Frenzy dkk)
 
-            tryCastForceHand();
-            tryTradeStocks();
-            tryGodzamokCombo();
+            // Bank buffer (pakai cache) -- dihitung DULUAN biar semua fungsi beli di bawah bisa hormatin ini
+            let bankBuffer = 0;
+            if (hasLucky.getLucky) {
+                bankBuffer = cpsRaw * 42000;
+            } else if (hasLucky.luckyDay) {
+                bankBuffer = cpsRaw * 6000;
+            }
 
-            // Elder Pledge: beli langsung kalau affordable
+            tryCastForceHand();
+            tryTradeStocks(bankBuffer);
+            tryGodzamokCombo();
+            tryPopWrinklers();
+            trySpendSugarLumps();
+            tryPriorityRebuy(bankBuffer);
+            tryOpportunisticUpgrades(bankBuffer);
+            tryHeavenlyUpgrades();
+
+            // refresh semua basis kalkulasi, soalnya fungsi-fungsi di atas bisa langsung ngubah cookies/CPS beneran
+            // (Godzamok jual -> CPS turun, priority rebuy/level up -> CPS naik, dll)
+            cookies = Game.cookies;
+            cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
+            cpsActual = Game.cookiesPs || cpsRaw;
+            bankBuffer = hasLucky.getLucky ? cpsRaw * 42000 : (hasLucky.luckyDay ? cpsRaw * 6000 : 0);
+
+            // Elder Pledge: beli langsung kalau affordable (hormatin bankBuffer)
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
             if (pledge && pledge.unlocked && !pledge.bought && Game.UpgradesInStore.includes(pledge)) {
-                if (cookies >= pledge.getPrice()) pledge.buy();
+                if (cookies - bankBuffer >= pledge.getPrice()) pledge.buy();
             }
 
             // Kumpulkan kandidat (skip null = upgrade non-CPS yang gak jelas efeknya)
@@ -268,13 +415,7 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // Bank buffer (pakai cache, bukan query tiap tick)
-            let bankBuffer = 0;
-            if (hasLucky.getLucky) {
-                bankBuffer = cpsRaw * 42000;
-            } else if (hasLucky.luckyDay) {
-                bankBuffer = cpsRaw * 6000;
-            }
+            // (bankBuffer udah di-refresh abis fungsi-fungsi di atas jalan)
 
             // Highlight (box-shadow inset, biar gak ke-crop parent overflow:hidden)
             let targetObj = finalAction.item;
