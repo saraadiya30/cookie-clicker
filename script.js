@@ -1,6 +1,7 @@
 Game.registerMod("cookie-bot-auto", {
     init: function() {
         if (window.autoCookiePureClickInterval) clearInterval(window.autoCookiePureClickInterval);
+        if (window.autoCookieGodzamokInterval) clearInterval(window.autoCookieGodzamokInterval);
         if (window.autoCookieBuyInterval) clearInterval(window.autoCookieBuyInterval);
 
         let lastEl = null;
@@ -400,6 +401,20 @@ Game.registerMod("cookie-bot-auto", {
             Game.ClickCookie();
         }, 5);
 
+        // === LOOP GODZAMOK: sell + rebuy, lebih cepat dari loop beli utama biar dapet lebih banyak siklus selama window Click Frenzy ===
+        window.autoCookieGodzamokInterval = setInterval(function() {
+            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
+            let bankBuffer = 0;
+            if (hasLucky.getLucky) {
+                bankBuffer = cpsRaw * 42000;
+            } else if (hasLucky.luckyDay) {
+                bankBuffer = cpsRaw * 6000;
+            }
+
+            tryGodzamokCombo();
+            tryPriorityRebuy(bankBuffer);
+        }, 100);
+
         // === LOOP LAMBAT: shimmer/lump + keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
         window.autoCookieBuyInterval = setInterval(function() {
             // shimmer (golden cookie/reindeer/wrath) + sugar lump -- gak perlu dicek secepat klik
@@ -432,11 +447,9 @@ Game.registerMod("cookie-bot-auto", {
 
             tryCastForceHand();
             tryTradeStocks(bankBuffer);
-            tryGodzamokCombo();
             tryPopWrinklers();
             trySpendSugarLumps();
             tryBuyTrivialBuildings(bankBuffer, cpsRaw);
-            tryPriorityRebuy(bankBuffer);
             tryOpportunisticUpgrades(bankBuffer);
             tryHeavenlyUpgrades();
 
