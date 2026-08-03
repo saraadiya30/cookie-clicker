@@ -1,10 +1,9 @@
 Game.registerMod("cookie-bot-auto", {
     init: function() {
-        if (window.autoCookieClickInterval) clearInterval(window.autoCookieClickInterval);
+        if (window.autoCookiePureClickInterval) clearInterval(window.autoCookiePureClickInterval);
         if (window.autoCookieBuyInterval) clearInterval(window.autoCookieBuyInterval);
 
         let lastEl = null;
-        const MILESTONES = [1, 10, 25, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600];
 
         // cache 'Get lucky' / 'Lucky day' biar gak query Game.Has tiap tick
         let hasLucky = { getLucky: false, luckyDay: false };
@@ -78,15 +77,9 @@ Game.registerMod("cookie-bot-auto", {
             } else {
                 try {
                     deltaCps = (typeof item.cps === 'function') ? item.cps(item) : 0;
-
-                    let nextMilestone = MILESTONES.find(m => m > item.amount);
-                    if (nextMilestone) {
-                        let distance = nextMilestone - item.amount;
-                        if (distance <= 5) {
-                            let bonusFactor = 1 + ((6 - distance) * 0.5);
-                            deltaCps *= bonusFactor;
-                        }
-                    }
+                    // catatan: dulu ada bonus dekat-milestone di sini, tapi ternyata gak ada mekanisme
+                    // kayak gitu di game asli (milestone cuma unlock achievement -> milk -> kitten,
+                    // efeknya gak langsung nempel ke deltaCps building ini) -- dihapus biar gak salah itung
                 } catch (e) {
                     deltaCps = 0;
                 }
@@ -190,6 +183,125 @@ Game.registerMod("cookie-bot-auto", {
             return; // TODO: isi setelah verifikasi API pasca-ascend pertama
         }
 
+        function hasClickBuffActive() {
+            for (let key in Game.buffs) {
+                let buff = Game.buffs[key];
+                if (buff && buff.multClick && buff.multClick > 1) return true;
+            }
+            return false;
+        }
+
+        // estimasi untung-rugi jual building buat combo Godzamok, sebelum beneran dieksekusi
+        function estimateGodzamokEV(obj, godzamokLvl) {
+            let sold = obj.amount;
+            if (sold <= 0) return { profitable: false };
+
+            // sisi untung: kenaikan nilai klik x sisa waktu Devastation x rate klik bot (10/detik dari interval 100ms)
+            let clickBefore = Game.mouseCps ? Game.mouseCps() : 0;
+            let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
+            let deltaMultClick = sold * rate;
+
+            let existingDevastation = Game.hasBuff ? Game.hasBuff('Devastation') : null;
+            let oldFactor = existingDevastation ? existingDevastation.multClick : 1;
+            let newFactor = oldFactor + deltaMultClick;
+            let clickAfter = clickBefore * (newFactor / oldFactor);
+            let deltaClickValue = clickAfter - clickBefore;
+
+            let remainingTime = existingDevastation ? existingDevastation.time : 10; // buff baru mulai dari 10 detik
+            let clicksRemaining = remainingTime * 10;
+
+            let expectedGain = deltaClickValue * clicksRemaining;
+
+            // sisi rugi: rebuyCost dihitung persis pakai formula asli game (basePrice, priceIncrease, free, modifyBuildingPrice)
+            let growthRatio = Game.priceIncrease || 1.15;
+            let free = obj.free || 0;
+            let rebuyCost = 0;
+            for (let k = 0; k < sold; k++) {
+                let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, k - free));
+                if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
+                rebuyCost += Math.ceil(p);
+            }
+
+            let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
+            const SAFETY_MARGIN = 0.05; // anggap refund 5% lebih kecil dari aktual, biar netCost gak underestimate
+            let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
+            let netCost = rebuyCost * (1 - safeSellMult); // yang beneran ilang abis siklus jual-beli (dengan buffer aman)
+
+            return { profitable: expectedGain > netCost, expectedGain, netCost };
+        }
+
+        // Godzamok combo: jual building yang kontribusinya <1% dari total CPS buat trigger buff klik (Devastation)
+        // -- KHUSUS pas Click Frenzy aktif (bukan Frenzy biasa), dan cuma kalau estimasi untungnya beneran positif
+        let godzamokPrevAmount = {}; // { buildingId: jumlah sebelum dijual, buat prioritas rebuy }
+        const GODZAMOK_THRESHOLD = 0.01; // 1% dari total raw CPS
+        function tryGodzamokCombo() {
+            if (!Game.hasGod) return;
+            let godzamokLvl = Game.hasGod('ruin');
+            if (!godzamokLvl) return; // Godzamok gak lagi di-slot
+            if (!hasClickBuffActive()) return; // khusus Click Frenzy, gak ada fallback ke Frenzy biasa
+
+            let totalCps = Game.cookiesPsRaw || 0;
+            if (totalCps <= 0) return;
+
+            for (let obj of Game.ObjectsById) {
+                if (!obj || obj.amount <= 0) continue;
+                if (MINIGAME_BUILDING_IDS.includes(obj.id)) continue; // jangan jual habis building minigame, biar akses Grimoire/Stock Market/Pantheon gak keputus
+
+                let buildingCps = 0;
+                try {
+                    buildingCps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
+                } catch (e) {
+                    buildingCps = 0;
+                }
+
+                let ratio = buildingCps / totalCps;
+                if (ratio < GODZAMOK_THRESHOLD) {
+                    let ev = estimateGodzamokEV(obj, godzamokLvl);
+                    if (!ev.profitable) continue; // estimasi rugi, skip
+
+                    godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
+                    obj.sell(-1); // jual semua unit building ini sekaligus
+                    setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
+                }
+            }
+        }
+
+        // beli balik bulk (1-1 secara internal) building bekas Godzamok, sampai balik ke jumlah semula
+        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
+        function tryPriorityRebuy(bankBuffer) {
+            for (let id in godzamokPrevAmount) {
+                let obj = Game.ObjectsById[id];
+                if (!obj) continue;
+
+                let target = godzamokPrevAmount[id];
+                if (obj.amount >= target) {
+                    delete godzamokPrevAmount[id]; // udah balik penuh, lepas dari prioritas
+                    continue;
+                }
+
+                let needed = target - obj.amount;
+                let boughtAny = false;
+                for (let i = 0; i < needed; i++) {
+                    let price;
+                    try {
+                        price = obj.getPrice();
+                    } catch (e) {
+                        break;
+                    }
+                    if (Game.cookies - bankBuffer >= price) {
+                        obj.buy(1);
+                        boughtAny = true;
+                    } else {
+                        break; // kena buffer / cookies gak cukup, stop buat item ini tick ini
+                    }
+                }
+
+                if (boughtAny) {
+                    setCategoryHighlight('priorityRebuy', findEl(obj, false), '#00ccff');
+                }
+            }
+        }
+
         // auto-pop wrinkler: tunggu Frenzy abis dulu (biar akumulasi 7x maksimal), baru pop begitu penuh
         const WRINKLER_MAX = 10; // naikin ke 14 kalau udah punya Elder Spice + Dragon Guts
         function tryPopWrinklers() {
@@ -249,38 +361,48 @@ Game.registerMod("cookie-bot-auto", {
 
         // building yang harganya di bawah 1% dari CPS base (bukan yang lagi kena buff) -> beli langsung,
         // gak perlu nunggu menang di ranking payback-period, soalnya biayanya gak signifikan
+        // -- itung dulu semua unit yang masih trivial + dalam budget, baru buy(n) SEKALI (biar suara gak spam)
         const TRIVIAL_BUY_RATIO = 0.01; // 1% dari cpsRaw
         function tryBuyTrivialBuildings(bankBuffer, cpsRaw) {
+            let growthRatio = Game.priceIncrease || 1.15;
+            let trivialCost = cpsRaw * TRIVIAL_BUY_RATIO;
+
             for (let obj of Game.ObjectsById) {
                 if (!obj) continue;
 
-                let safety = 0; // guard biar gak infinite loop kalau ada kondisi aneh
-                while (safety < 50) {
-                    safety++;
-                    let price;
-                    try {
-                        price = obj.getPrice();
-                    } catch (e) {
-                        break;
-                    }
+                let free = obj.free || 0;
+                let amount = obj.amount;
+                let budget = Math.max(0, Game.cookies - bankBuffer);
+                let cum = 0;
+                let n = 0;
 
-                    let trivialCost = cpsRaw * TRIVIAL_BUY_RATIO;
-                    if (price > trivialCost) break; // udah gak trivial lagi, stop
+                while (n < 200) { // guard biar gak infinite loop
+                    let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, (amount + n) - free));
+                    if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
+                    p = Math.ceil(p);
 
-                    if (Game.cookies - bankBuffer >= price) {
-                        obj.buy(1);
-                        setCategoryHighlight('trivialBuy', findEl(obj, false), '#33ff99');
-                    } else {
-                        break; // kena buffer / cookies gak cukup
-                    }
+                    if (p > trivialCost) break; // udah gak trivial lagi
+                    if (cum + p > budget) break; // kena buffer / budget abis
+
+                    cum += p;
+                    n++;
+                }
+
+                if (n > 0) {
+                    obj.buy(n); // satu kali panggil -> satu kali suara, bukan n kali
+                    setCategoryHighlight('trivialBuy', findEl(obj, false), '#33ff99');
                 }
             }
         }
 
-        // === LOOP CEPAT: klik cookie + shimmer + sugar lump (respons tinggi) ===
-        window.autoCookieClickInterval = setInterval(function() {
+        // === LOOP KLIK MURNI: cuma Game.ClickCookie(), interval paling cepat ===
+        window.autoCookiePureClickInterval = setInterval(function() {
             Game.ClickCookie();
+        }, 5);
 
+        // === LOOP LAMBAT: shimmer/lump + keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
+        window.autoCookieBuyInterval = setInterval(function() {
+            // shimmer (golden cookie/reindeer/wrath) + sugar lump -- gak perlu dicek secepat klik
             if (Game.shimmers && Game.shimmers.length > 0) {
                 for (let i = Game.shimmers.length - 1; i >= 0; i--) {
                     if (Game.shimmers[i] && Game.shimmers[i].pop) {
@@ -295,10 +417,7 @@ Game.registerMod("cookie-bot-auto", {
                     Game.lumpClick();
                 }
             }
-        }, 100);
 
-        // === LOOP LAMBAT: keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
-        window.autoCookieBuyInterval = setInterval(function() {
             let cookies = Game.cookies;
             let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1; // basis efisiensi (deltaCps), konsisten antar buff
             let cpsActual = Game.cookiesPs || cpsRaw; // basis waktu nunggu, refleksiin buff CPS yang lagi aktif (Frenzy dkk)
@@ -313,9 +432,11 @@ Game.registerMod("cookie-bot-auto", {
 
             tryCastForceHand();
             tryTradeStocks(bankBuffer);
+            tryGodzamokCombo();
             tryPopWrinklers();
             trySpendSugarLumps();
             tryBuyTrivialBuildings(bankBuffer, cpsRaw);
+            tryPriorityRebuy(bankBuffer);
             tryOpportunisticUpgrades(bankBuffer);
             tryHeavenlyUpgrades();
 
@@ -351,7 +472,7 @@ Game.registerMod("cookie-bot-auto", {
 
             if (candidates.length === 0) return;
 
-            // Cari target utama (payback period terbaik)
+            // Cari target utama (payback period terbaik: timeToSave + payback)
             let bestTarget = null;
             let minPP = Infinity;
 
@@ -368,7 +489,7 @@ Game.registerMod("cookie-bot-auto", {
 
             if (!bestTarget) return;
 
-            // Logika stepping-stone
+            // Logika stepping-stone: cek apakah beli sesuatu yang lebih murah dulu bikin nyampe ke bestTarget lebih cepat
             let finalAction = bestTarget;
             let timeDirect = Math.max(0, bestTarget.cost - cookies) / cpsActual;
             let bestTimeSaved = 0;
@@ -392,8 +513,6 @@ Game.registerMod("cookie-bot-auto", {
                     finalAction = cand;
                 }
             }
-
-            // (bankBuffer udah di-refresh abis fungsi-fungsi di atas jalan)
 
             // Highlight (box-shadow inset, biar gak ke-crop parent overflow:hidden)
             let targetObj = finalAction.item;
@@ -422,7 +541,7 @@ Game.registerMod("cookie-bot-auto", {
                     clear();
                 }
             }
-        }, 750);
+        }, 1000);
 
         Game.Notify('Cookie Bot', 'Bot aktif & siap jalan!', [16, 5]);
     }
