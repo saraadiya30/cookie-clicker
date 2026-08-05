@@ -213,9 +213,10 @@ Game.registerMod("cookie-bot-auto", {
         //    (FIX: sebelumnya baca Game.mouseCps()/Game.hasBuff('Devastation') live tiap panggilan, jadi
         //    building A yang kejual duluan mengubah baseline buat building B/C/D sehingga mereka keliatan
         //    gak profitable padahal aslinya profitable -- makanya cuma 1 jenis building yang kejual per tick)
-        function estimateGodzamokEV(obj, godzamokLvl, baseline) {
-            let sold = obj.amount;
-            if (sold <= 0) return { profitable: false };
+        function estimateGodzamokEV(obj, godzamokLvl, baseline, sellAmount) {
+            let sold = sellAmount;
+            if (!sold || sold <= 0) return { profitable: false };
+            let floor = obj.amount - sold; // titik terendah abis dijual (0 buat building biasa, >=1 buat minigame)
 
             // sisi untung: kenaikan nilai klik x sisa waktu Devastation x rate klik bot (10/detik dari interval 100ms)
             let clickBefore = baseline.clickBefore;
@@ -232,11 +233,12 @@ Game.registerMod("cookie-bot-auto", {
 
             let expectedGain = deltaClickValue * clicksRemaining;
 
-            // sisi rugi: rebuyCost dihitung persis pakai formula asli game (basePrice, priceIncrease, free, modifyBuildingPrice)
+            // sisi rugi: rebuyCost dihitung persis pakai formula asli game, mulai dari floor (bukan selalu dari 0,
+            // biar akurat buat building yang cuma dijual sebagian kayak building minigame yang nyisa 1 unit)
             let growthRatio = Game.priceIncrease || 1.15;
             let free = obj.free || 0;
             let rebuyCost = 0;
-            for (let k = 0; k < sold; k++) {
+            for (let k = floor; k < floor + sold; k++) {
                 let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, k - free));
                 if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
                 rebuyCost += Math.ceil(p);
@@ -275,7 +277,14 @@ Game.registerMod("cookie-bot-auto", {
 
             for (let obj of Game.ObjectsById) {
                 if (!obj || obj.amount <= 0) continue;
-                if (MINIGAME_BUILDING_IDS.includes(obj.id)) continue; // jangan jual habis building minigame, biar akses Grimoire/Stock Market/Pantheon gak keputus
+
+                // building minigame (Farm/Bank/Temple/Wizard Tower) boleh ikut dijual buat combo,
+                // tapi disisain minimal 1 unit -- jual habis ke 0 gak ngilangin progress minigame-nya
+                // (dikonfirmasi: cuma bikin tab-nya ke-hide sementara sampe beli 1 lagi), tapi nyisain 1
+                // itu jaga-jaga murah biar fungsi bot yang gantung ke situ (misal tryCastForceHand
+                // yang baca wizardTower.minigame langsung) tetep punya akses tanpa perlu nebak-nebak
+                let minSellFloor = MINIGAME_BUILDING_IDS.includes(obj.id) ? 1 : 0;
+                if (obj.amount <= minSellFloor) continue; // udah di floor, gak ada yang bisa dijual lagi
 
                 let buildingCps = 0;
                 try {
@@ -287,12 +296,80 @@ Game.registerMod("cookie-bot-auto", {
 
                 let ratio = buildingCps / totalCps;
                 if (ratio < GODZAMOK_THRESHOLD) {
-                    let ev = estimateGodzamokEV(obj, godzamokLvl, baseline);
+                    let sellAmount = obj.amount - minSellFloor;
+                    let ev = estimateGodzamokEV(obj, godzamokLvl, baseline, sellAmount);
                     if (!ev.profitable) continue; // estimasi rugi, skip
 
                     godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
-                    obj.sell(-1); // jual semua unit building ini sekaligus
+                    obj.sell(sellAmount); // jual sisa di atas floor, bukan semua
                     setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
+                }
+            }
+        }
+
+        // beli banyak-banyak building yang RASIO untung-combo-Godzamoknya paling bagus
+        // (rate combo per biaya efektif rebuy -- makin murah harganya relatif, makin bagus buat di-farm)
+        // -- khusus late-game dimana CPS growth udah gak signifikan, jadi cookies bank
+        //    diarahin buat numpuk AMOUNT building murah, biar combo Godzamok makin untung tiap sale
+        // -- karena rate combo (sold * rate) itu SAMA buat semua building (cuma tergantung level Godzamok,
+        //    bukan jenis building), rasio ini pada dasarnya = 1 / harga-efektif -- jadi yang menang
+        //    selalu building dengan harga per-unit paling murah relatif ke reward combo-nya
+        // -- gak jalan kalau Godzamok (Ruin) gak lagi di-slot, soalnya percuma
+        function tryBuyForGodzamokCombo(bankBuffer, godzamokLvl) {
+            if (!godzamokLvl) return;
+
+            let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
+            let growthRatio = Game.priceIncrease || 1.15;
+            const SAFETY_MARGIN = 0.05;
+
+            let candidates = [];
+            for (let obj of Game.ObjectsById) {
+                if (!obj) continue;
+                // building minigame sekarang ikut di-farm juga -- sell-nya udah disisain 1 unit di tryGodzamokCombo
+
+                let price;
+                try {
+                    price = obj.getPrice();
+                } catch (e) {
+                    continue;
+                }
+                if (!price || price <= 0) continue;
+
+                let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
+                let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
+                let effectiveCost = price * (1 - safeSellMult); // biaya bersih siklus jual-beli buat unit ini nanti
+                if (effectiveCost <= 0) continue;
+
+                candidates.push({ obj, ratio: rate / effectiveCost });
+            }
+
+            candidates.sort((a, b) => b.ratio - a.ratio); // rasio terbaik (paling murah efektif) diproses duluan
+
+            let budget = Math.max(0, Game.cookies - bankBuffer);
+
+            for (let cand of candidates) {
+                if (budget <= 0) break;
+
+                let obj = cand.obj;
+                let free = obj.free || 0;
+                let amount = obj.amount;
+                let cum = 0;
+                let n = 0;
+
+                while (n < 500) { // guard biar gak infinite loop / kelamaan
+                    let p = obj.basePrice * Math.pow(growthRatio, Math.max(0, (amount + n) - free));
+                    if (typeof Game.modifyBuildingPrice === 'function') p = Game.modifyBuildingPrice(obj, p);
+                    p = Math.ceil(p);
+
+                    if (cum + p > budget) break; // budget abis buat building ini, lanjut ke kandidat berikutnya
+                    cum += p;
+                    n++;
+                }
+
+                if (n > 0) {
+                    obj.buy(n); // satu kali panggil, satu kali suara
+                    budget -= cum;
+                    setCategoryHighlight('comboFarm', findEl(obj, false), '#ff9900');
                 }
             }
         }
@@ -466,9 +543,13 @@ Game.registerMod("cookie-bot-auto", {
             let bankBuffer = (hasLucky.getLucky || hasLucky.luckyDay) ? cookies * BANK_BUFFER_RATIO : 0;
 
             tryCastForceHand();
-            tryTradeStocks(bankBuffer);
+            // tryTradeStocks(bankBuffer); // dimatiin -- boros kalau broker masih dikit
             tryPopWrinklers();
             trySpendSugarLumps();
+
+            let godzamokLvl = Game.hasGod ? Game.hasGod('ruin') : 0;
+            tryBuyForGodzamokCombo(bankBuffer, godzamokLvl); // farm building murah buat combo Godzamok
+
             tryBuyTrivialBuildings(bankBuffer, cpsRaw);
             tryOpportunisticUpgrades(bankBuffer);
             tryHeavenlyUpgrades();
