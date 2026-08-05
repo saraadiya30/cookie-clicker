@@ -14,6 +14,10 @@ Game.registerMod("cookie-bot-auto", {
         }
         refreshLuckyCache();
 
+        // reserve buat combo Lucky: persentase dari cookies bank saat itu (bukan kelipatan CPS),
+        // biar gak pernah lebih besar dari cookies itu sendiri (anti-deadlock)
+        const BANK_BUFFER_RATIO = 0.7;
+
         function clear() {
             if (lastEl) {
                 lastEl.style.boxShadow = '';
@@ -60,12 +64,19 @@ Game.registerMod("cookie-bot-auto", {
 
             let deltaCps = 0;
 
+            // rasio buat convert nilai CPS "mentah" (storedCps/storedTotalCps, sebelum mult global
+            // prestige/Heavenly Power/milk/dst) ke skala yang sama kayak Game.cookiesPsRaw, biar
+            // adil dibandingin sama upgrade berbasis `power` (yang udah pake cookiesPsRaw langsung)
+            let globalMultRaw = (Game.buildingCps && Game.buildingCps > 0) ? (Game.cookiesPsRaw / Game.buildingCps) : 1;
+
             if (isUpgrade) {
                 try {
                     if (item.buildingTie) {
                         let b = item.buildingTie;
-                        let bCps = (typeof b.cps === 'function') ? b.cps(b) : 0;
-                        deltaCps = bCps * b.amount;
+                        // storedTotalCps = amount * storedCps, udah termasuk level bonus & buildMult (dewa)
+                        let bTotalCps = typeof b.storedTotalCps === 'number' ? b.storedTotalCps
+                            : (typeof b.cps === 'function' ? b.cps(b) * b.amount : 0);
+                        deltaCps = bTotalCps * globalMultRaw;
                     } else if (item.power) {
                         deltaCps = Game.cookiesPsRaw * (item.power / 100);
                     } else {
@@ -77,10 +88,11 @@ Game.registerMod("cookie-bot-auto", {
                 }
             } else {
                 try {
-                    deltaCps = (typeof item.cps === 'function') ? item.cps(item) : 0;
-                    // catatan: dulu ada bonus dekat-milestone di sini, tapi ternyata gak ada mekanisme
-                    // kayak gitu di game asli (milestone cuma unlock achievement -> milk -> kitten,
-                    // efeknya gak langsung nempel ke deltaCps building ini) -- dihapus biar gak salah itung
+                    // storedCps udah termasuk level bonus & buildMult (dewa), tinggal dikali rasio
+                    // global buat nyamain skala sama cookiesPsRaw
+                    let rawCps = typeof item.storedCps === 'number' ? item.storedCps
+                        : (typeof item.cps === 'function' ? item.cps(item) : 0);
+                    deltaCps = rawCps * globalMultRaw;
                 } catch (e) {
                     deltaCps = 0;
                 }
@@ -158,10 +170,13 @@ Game.registerMod("cookie-bot-auto", {
         // upgrade yang efeknya gak bisa dihitung presisi (Kitten dkk) -> beli opportunistic
         // asal affordable & murah relatif ke bank cookies, bukan ranking payback-period
         // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
+        // -- kecualiin upgrade yang trigger keputusan besar (Grandmapocalypse dkk), biar dibeli manual aja
         const OPPORTUNISTIC_MAX_COST_RATIO = 0.05; // maks 5% dari cookies sekarang
+        const EXCLUDED_FROM_AUTOBUY = ['One mind', 'Communal brainsweep', 'Elder Pact'];
         function tryOpportunisticUpgrades(bankBuffer) {
             for (let up of Game.UpgradesInStore) {
                 if (!up || up.pool === 'toggle' || up.name === 'Elder Covenant') continue;
+                if (EXCLUDED_FROM_AUTOBUY.includes(up.name)) continue;
                 if (up.buildingTie || up.power) continue; // ini udah dihandle sistem payback biasa
 
                 let cost = 0;
@@ -193,22 +208,26 @@ Game.registerMod("cookie-bot-auto", {
         }
 
         // estimasi untung-rugi jual building buat combo Godzamok, sebelum beneran dieksekusi
-        function estimateGodzamokEV(obj, godzamokLvl) {
+        // -- baseline (clickBefore, oldFactor, remainingTime) di-snapshot SEKALI per tick di tryGodzamokCombo,
+        //    biar evaluasi building ke-2/3/dst gak ke-skip gara-gara efek sale building sebelumnya di tick yang sama
+        //    (FIX: sebelumnya baca Game.mouseCps()/Game.hasBuff('Devastation') live tiap panggilan, jadi
+        //    building A yang kejual duluan mengubah baseline buat building B/C/D sehingga mereka keliatan
+        //    gak profitable padahal aslinya profitable -- makanya cuma 1 jenis building yang kejual per tick)
+        function estimateGodzamokEV(obj, godzamokLvl, baseline) {
             let sold = obj.amount;
             if (sold <= 0) return { profitable: false };
 
             // sisi untung: kenaikan nilai klik x sisa waktu Devastation x rate klik bot (10/detik dari interval 100ms)
-            let clickBefore = Game.mouseCps ? Game.mouseCps() : 0;
+            let clickBefore = baseline.clickBefore;
             let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
             let deltaMultClick = sold * rate;
 
-            let existingDevastation = Game.hasBuff ? Game.hasBuff('Devastation') : null;
-            let oldFactor = existingDevastation ? existingDevastation.multClick : 1;
+            let oldFactor = baseline.oldFactor;
             let newFactor = oldFactor + deltaMultClick;
             let clickAfter = clickBefore * (newFactor / oldFactor);
             let deltaClickValue = clickAfter - clickBefore;
 
-            let remainingTime = existingDevastation ? existingDevastation.time : 10; // buff baru mulai dari 10 detik
+            let remainingTime = baseline.remainingTime; // buff baru mulai dari 10 detik
             let clicksRemaining = remainingTime * 10;
 
             let expectedGain = deltaClickValue * clicksRemaining;
@@ -241,8 +260,18 @@ Game.registerMod("cookie-bot-auto", {
             if (!godzamokLvl) return; // Godzamok gak lagi di-slot
             if (!hasClickBuffActive()) return; // khusus Click Frenzy, gak ada fallback ke Frenzy biasa
 
-            let totalCps = Game.cookiesPsRaw || 0;
+            let totalCps = Game.buildingCps || 0; // pakai skala yang sama kayak storedTotalCps (sebelum mult global)
             if (totalCps <= 0) return;
+
+            // snapshot baseline SEKALI di awal tick -- biar semua building dievaluasi terhadap
+            // klik value & status Devastation yang sama, bukan yang udah berubah gara-gara sale
+            // building sebelumnya di tick yang sama
+            let existingDevastation = Game.hasBuff ? Game.hasBuff('Devastation') : null;
+            let baseline = {
+                clickBefore: Game.mouseCps ? Game.mouseCps() : 0,
+                oldFactor: existingDevastation ? existingDevastation.multClick : 1,
+                remainingTime: existingDevastation ? existingDevastation.time : 10
+            };
 
             for (let obj of Game.ObjectsById) {
                 if (!obj || obj.amount <= 0) continue;
@@ -250,14 +279,15 @@ Game.registerMod("cookie-bot-auto", {
 
                 let buildingCps = 0;
                 try {
-                    buildingCps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
+                    buildingCps = typeof obj.storedTotalCps === 'number' ? obj.storedTotalCps
+                        : (typeof obj.cps === 'function' ? obj.cps(obj) * obj.amount : 0);
                 } catch (e) {
                     buildingCps = 0;
                 }
 
                 let ratio = buildingCps / totalCps;
                 if (ratio < GODZAMOK_THRESHOLD) {
-                    let ev = estimateGodzamokEV(obj, godzamokLvl);
+                    let ev = estimateGodzamokEV(obj, godzamokLvl, baseline);
                     if (!ev.profitable) continue; // estimasi rugi, skip
 
                     godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
@@ -344,7 +374,8 @@ Game.registerMod("cookie-bot-auto", {
                 if (!obj || obj.amount <= 0) continue;
                 let cps = 0;
                 try {
-                    cps = (typeof obj.cps === 'function' ? obj.cps(obj) : 0) * obj.amount;
+                    cps = typeof obj.storedTotalCps === 'number' ? obj.storedTotalCps
+                        : (typeof obj.cps === 'function' ? obj.cps(obj) * obj.amount : 0);
                 } catch (e) {
                     cps = 0;
                 }
@@ -403,13 +434,7 @@ Game.registerMod("cookie-bot-auto", {
 
         // === LOOP GODZAMOK: sell + rebuy, lebih cepat dari loop beli utama biar dapet lebih banyak siklus selama window Click Frenzy ===
         window.autoCookieGodzamokInterval = setInterval(function() {
-            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
-            let bankBuffer = 0;
-            if (hasLucky.getLucky) {
-                bankBuffer = cpsRaw * 42000;
-            } else if (hasLucky.luckyDay) {
-                bankBuffer = cpsRaw * 6000;
-            }
+            let bankBuffer = (hasLucky.getLucky || hasLucky.luckyDay) ? Game.cookies * BANK_BUFFER_RATIO : 0;
 
             tryGodzamokCombo();
             tryPriorityRebuy(bankBuffer);
@@ -437,13 +462,8 @@ Game.registerMod("cookie-bot-auto", {
             let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1; // basis efisiensi (deltaCps), konsisten antar buff
             let cpsActual = Game.cookiesPs || cpsRaw; // basis waktu nunggu, refleksiin buff CPS yang lagi aktif (Frenzy dkk)
 
-            // Bank buffer (pakai cache) -- dihitung DULUAN biar semua fungsi beli di bawah bisa hormatin ini
-            let bankBuffer = 0;
-            if (hasLucky.getLucky) {
-                bankBuffer = cpsRaw * 42000;
-            } else if (hasLucky.luckyDay) {
-                bankBuffer = cpsRaw * 6000;
-            }
+            // Bank buffer (persentase dari cookies bank) -- dihitung DULUAN biar semua fungsi beli di bawah bisa hormatin ini
+            let bankBuffer = (hasLucky.getLucky || hasLucky.luckyDay) ? cookies * BANK_BUFFER_RATIO : 0;
 
             tryCastForceHand();
             tryTradeStocks(bankBuffer);
@@ -457,7 +477,7 @@ Game.registerMod("cookie-bot-auto", {
             cookies = Game.cookies;
             cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
             cpsActual = Game.cookiesPs || cpsRaw;
-            bankBuffer = hasLucky.getLucky ? cpsRaw * 42000 : (hasLucky.luckyDay ? cpsRaw * 6000 : 0);
+            bankBuffer = (hasLucky.getLucky || hasLucky.luckyDay) ? cookies * BANK_BUFFER_RATIO : 0;
 
             // Elder Pledge: beli langsung kalau affordable (hormatin bankBuffer)
             let pledge = Game.UpgradesById && Game.UpgradesById[74];
