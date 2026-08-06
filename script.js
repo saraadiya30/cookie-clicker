@@ -39,22 +39,30 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
-        // sistem highlight multi-kategori: tiap jenis keputusan bot punya penanda visual sendiri,
-        // gak saling timpa satu sama lain, dan persist (gak auto-clear) biar user bisa liat riwayat terakhir
-        let categoryHighlights = {}; // { kategori: elemen yang lagi di-highlight }
+        // sistem flash-highlight: tiap ELEMEN yang kena aksi (bukan per kategori) dikasih highlight yang
+        // bertahan minimal FLASH_DURATION_MS, independen satu sama lain -- soalnya kalau banyak building
+        // kena aksi dalam 1 tick yang sama (misal 11 building kejual sekaligus di tryGodzamokCombo),
+        // browser cuma sempet re-render abis loop-nya selesai, jadi kalau cuma nyimpen 1 slot per kategori
+        // (versi lama), yang keliatan cuma elemen TERAKHIR doang -- dan itu pun ketiban lagi tick berikutnya
+        // (100ms) sebelum sempet disadari. Sekarang tiap elemen independen dan punya durasi tampil minimum.
+        const FLASH_DURATION_MS = 600;
+        let flashTimers = new Map(); // elemen -> timeout id, biar kalau elemen yang sama di-flash lagi, timer lama di-reset
         function setCategoryHighlight(category, el, color) {
-            if (categoryHighlights[category] === el) return; // gak ada perubahan, skip
-            if (categoryHighlights[category]) {
-                categoryHighlights[category].style.boxShadow = '';
-                categoryHighlights[category].style.backgroundColor = '';
+            if (!el) return;
+
+            el.style.transition = 'box-shadow 0.6s ease-out, background-color 0.6s ease-out';
+            el.style.boxShadow = 'inset 0 0 0 3px ' + color;
+            el.style.backgroundColor = color + '33'; // versi transparan buat background
+
+            if (flashTimers.has(el)) {
+                clearTimeout(flashTimers.get(el)); // reset timer kalau elemen yang sama kena aksi lagi
             }
-            if (el) {
-                el.style.boxShadow = 'inset 0 0 0 3px ' + color;
-                el.style.backgroundColor = color + '33'; // versi transparan buat background
-                categoryHighlights[category] = el;
-            } else {
-                categoryHighlights[category] = null;
-            }
+            let timeoutId = setTimeout(function() {
+                el.style.boxShadow = '';
+                el.style.backgroundColor = '';
+                flashTimers.delete(el);
+            }, FLASH_DURATION_MS);
+            flashTimers.set(el, timeoutId);
         }
 
         function findEl(item, isUpgrade) {
@@ -350,7 +358,6 @@ Game.registerMod("cookie-bot-auto", {
 
                     godzamokPrevAmount[obj.id] = Math.max(godzamokPrevAmount[obj.id] || 0, obj.amount);
                     obj.sell(sellAmount); // jual sisa di atas floor, bukan semua
-                    setCategoryHighlight('godzamok', findEl(obj, false), '#ff6600');
                 }
             }
         }
@@ -402,15 +409,27 @@ Game.registerMod("cookie-bot-auto", {
                 if (result.n > 0) {
                     cand.obj.buy(result.n); // satu kali panggil, satu kali suara
                     budget -= result.cost;
-                    setCategoryHighlight('comboFarm', findEl(cand.obj, false), '#ff9900');
                 }
             }
         }
 
-        // beli balik bulk (1-1 secara internal) building bekas Godzamok, sampai balik ke jumlah semula
-        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
-        function tryPriorityRebuy(bankBuffer) {
-            for (let id in godzamokPrevAmount) {
+        // beli balik bulk building bekas Godzamok, sampai balik ke jumlah semula
+        // -- GAK pake bankBuffer: rebuy ini restore state yang barusan sengaja dijual buat combo,
+        //    bukan pembelian diskresioner baru, jadi seluruh cookies yang ada boleh dipake full
+        // -- diurutin dari yang PALING MURAH direbuy duluan, biar kalau budget tetep gak cukup
+        //    buat semuanya, yang gagal kebeli itu yang paling mahal (bukan asal urutan building id)
+        function tryPriorityRebuy() {
+            let sorted = Object.keys(godzamokPrevAmount).map(function(id) {
+                let obj = Game.ObjectsById[id];
+                let price = Infinity;
+                if (obj) {
+                    try { price = obj.getPrice(); } catch (e) { price = Infinity; }
+                }
+                return { id, price };
+            }).sort((a, b) => a.price - b.price);
+
+            for (let entry of sorted) {
+                let id = entry.id;
                 let obj = Game.ObjectsById[id];
                 if (!obj) continue;
 
@@ -421,12 +440,11 @@ Game.registerMod("cookie-bot-auto", {
                 }
 
                 let needed = target - obj.amount;
-                let budget = Math.max(0, Game.cookies - bankBuffer);
+                let budget = Math.max(0, Game.cookies);
                 let result = calcAffordableUnits(obj, budget, needed);
 
                 if (result.n > 0) {
-                    obj.buy(result.n); // satu kali panggil, bukan buy(1) diulang -- jauh lebih ringan buat amount gede
-                    setCategoryHighlight('priorityRebuy', findEl(obj, false), '#00ccff');
+                    obj.buy(result.n); // satu kali panggil, bukan buy(1) diulang
                 }
             }
         }
@@ -509,11 +527,8 @@ Game.registerMod("cookie-bot-auto", {
 
         // === LOOP GODZAMOK: sell + rebuy, lebih cepat dari loop beli utama biar dapet lebih banyak siklus selama window Click Frenzy ===
         window.autoCookieGodzamokInterval = setInterval(function() {
-            let cpsRaw = Game.cookiesPsRaw || Game.cookiesPs || 1;
-            let bankBuffer = computeBankBuffer(Game.cookies, cpsRaw);
-
             tryGodzamokCombo();
-            tryPriorityRebuy(bankBuffer);
+            tryPriorityRebuy();
         }, 100);
 
         // === LOOP LAMBAT: shimmer/lump + keputusan beli & spell (harga/CPS/mana gak berubah secepat itu) ===
