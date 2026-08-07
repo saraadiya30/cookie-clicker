@@ -4,7 +4,25 @@ Game.registerMod("cookie-bot-auto", {
         if (window.autoCookieGodzamokInterval) clearInterval(window.autoCookieGodzamokInterval);
         if (window.autoCookieBuyInterval) clearInterval(window.autoCookieBuyInterval);
 
-        let lastEl = null;
+        // bersihin sisa highlight dari versi sebelumnya (sebelum fitur highlight dihapus total) --
+        // one-time cleanup doang, biar warna yang kelanjur nempel di elemen DOM (dari sebelum
+        // di-reload) ilang, dan gak ada residual style pas mod ini jalan generasi baru
+        for (let obj of Game.ObjectsById) {
+            let el = document.getElementById('product' + obj.id);
+            if (el) {
+                el.style.boxShadow = '';
+                el.style.backgroundColor = '';
+                el.style.transition = '';
+            }
+        }
+        for (let i = 0; i < Game.UpgradesInStore.length; i++) {
+            let el = document.getElementById('upgrade' + i);
+            if (el) {
+                el.style.boxShadow = '';
+                el.style.backgroundColor = '';
+                el.style.transition = '';
+            }
+        }
 
         // cache 'Get lucky' / 'Lucky day' biar gak query Game.Has tiap tick
         let hasLucky = { getLucky: false, luckyDay: false };
@@ -29,49 +47,6 @@ Game.registerMod("cookie-bot-auto", {
             let luckyBuffer = (hasLucky.getLucky || hasLucky.luckyDay) ? cookies * BANK_BUFFER_RATIO : 0;
             let generalBuffer = (cpsRaw || 0) * CPS_BUFFER_SECONDS;
             return Math.max(luckyBuffer, generalBuffer);
-        }
-
-        function clear() {
-            if (lastEl) {
-                lastEl.style.boxShadow = '';
-                lastEl.style.backgroundColor = '';
-                lastEl = null;
-            }
-        }
-
-        // sistem flash-highlight: tiap ELEMEN yang kena aksi (bukan per kategori) dikasih highlight yang
-        // bertahan minimal FLASH_DURATION_MS, independen satu sama lain -- soalnya kalau banyak building
-        // kena aksi dalam 1 tick yang sama (misal 11 building kejual sekaligus di tryGodzamokCombo),
-        // browser cuma sempet re-render abis loop-nya selesai, jadi kalau cuma nyimpen 1 slot per kategori
-        // (versi lama), yang keliatan cuma elemen TERAKHIR doang -- dan itu pun ketiban lagi tick berikutnya
-        // (100ms) sebelum sempet disadari. Sekarang tiap elemen independen dan punya durasi tampil minimum.
-        const FLASH_DURATION_MS = 600;
-        let flashTimers = new Map(); // elemen -> timeout id, biar kalau elemen yang sama di-flash lagi, timer lama di-reset
-        function setCategoryHighlight(category, el, color) {
-            if (!el) return;
-
-            el.style.transition = 'box-shadow 0.6s ease-out, background-color 0.6s ease-out';
-            el.style.boxShadow = 'inset 0 0 0 3px ' + color;
-            el.style.backgroundColor = color + '33'; // versi transparan buat background
-
-            if (flashTimers.has(el)) {
-                clearTimeout(flashTimers.get(el)); // reset timer kalau elemen yang sama kena aksi lagi
-            }
-            let timeoutId = setTimeout(function() {
-                el.style.boxShadow = '';
-                el.style.backgroundColor = '';
-                flashTimers.delete(el);
-            }, FLASH_DURATION_MS);
-            flashTimers.set(el, timeoutId);
-        }
-
-        function findEl(item, isUpgrade) {
-            if (!item) return null;
-            if (isUpgrade) {
-                let index = Game.UpgradesInStore.indexOf(item);
-                return index !== -1 ? document.getElementById('upgrade' + index) : null;
-            }
-            return document.getElementById('product' + item.id);
         }
 
         // building minigame (Farm/Bank/Temple/Wizard Tower) -- dipake di beberapa tempat
@@ -181,7 +156,6 @@ Game.registerMod("cookie-bot-auto", {
             if (grimoire.magic >= grimoire.magicM && grimoire.magic >= cost) {
                 grimoire.castSpell(spell);
                 Game.Notify('Cookie Bot', 'Force the Hand of Fate dicast!', [16, 5]);
-                setCategoryHighlight('forceHand', document.getElementById('grimoireSpell' + spell.id), '#ffcc00');
 
                 if (Game.shimmers && Game.shimmers.length > 0) {
                     for (let i = Game.shimmers.length - 1; i >= 0; i--) {
@@ -193,49 +167,17 @@ Game.registerMod("cookie-bot-auto", {
             }
         }
 
-        // auto-trade stock market: beli kalau di bawah resting value & rising, jual kalau di atas resting value & falling
-        // -- hormatin bankBuffer pas beli, gak nyolong reserve buat Lucky combo
-        function tryTradeStocks(bankBuffer) {
-            let bank = Game.Objects['Bank'];
-            if (!bank || !bank.minigame) return; // Stock Market belum ke-unlock
-
-            let market = bank.minigame;
-
-            for (let i = 0; i < market.goodsById.length; i++) {
-                let good = market.goodsById[i];
-                let resting = market.getRestingVal(good.id);
-
-                // Jual dulu: harga di atas resting value & lagi falling (mode 2/4), masih punya stock
-                if (good.stock > 0 && good.val > resting && (good.mode === 2 || good.mode === 4)) {
-                    market.sellGood(good.id, 10000);
-                    setCategoryHighlight('stockMarket', document.getElementById('bankGood-' + good.id), '#ff3366');
-                    continue; // last jadi 2 abis jual, gak bisa langsung beli di tick yang sama
-                }
-
-                // Beli: harga di bawah resting value & lagi rising (mode 1/3)
-                if (good.val < resting && (good.mode === 1 || good.mode === 3)) {
-                    // hitung manual (bukan pakai sentinel 10000) biar budgetnya nyisain bankBuffer
-                    let costInS = market.getGoodPrice(good);
-                    let overhead = 1 + 0.01 * (20 * Math.pow(0.95, market.brokers));
-                    let costPerUnit = Game.cookiesPsRawHighest * costInS * overhead;
-                    let budget = Math.max(0, Game.cookies - bankBuffer);
-                    let n = costPerUnit > 0 ? Math.floor(budget / costPerUnit) : 0;
-
-                    if (n > 0) {
-                        market.buyGood(good.id, n);
-                        setCategoryHighlight('stockMarket', document.getElementById('bankGood-' + good.id), '#33ccff');
-                    }
-                }
-            }
-        }
-
-        // upgrade yang efeknya gak bisa dihitung presisi (Kitten dkk) -> beli opportunistic
-        // asal affordable & murah relatif ke bank cookies, bukan ranking payback-period
-        // -- hormatin bankBuffer, gak nyolong reserve buat Lucky combo
+        // upgrade yang efeknya gak bisa dihitung presisi (Kitten dkk) -> beli semua yang affordable
+        // -- SEBELUMNYA dibatasin maks 5% dari cookies bank saat itu, tapi itu bikin upgrade penting
+        //    ketunda kelamaan di late-game (harga sering di atas 5% bank walau tetep worth dibeli).
+        //    Upgrade tipe ini emang selalu net-positive buat dimiliki (beda sama building yang
+        //    mahal-murahnya perlu ditimbang), jadi selama masih di dalam bankBuffer, gak ada
+        //    alasan buat nunda -- cap-nya dihapus, cuma dibatasin bankBuffer doang
+        // -- diurutin termurah dulu, biar makin banyak upgrade yang kebeli sebelum budget abis di tick itu
         // -- kecualiin upgrade yang trigger keputusan besar (Grandmapocalypse dkk), biar dibeli manual aja
-        const OPPORTUNISTIC_MAX_COST_RATIO = 0.05; // maks 5% dari cookies sekarang
         const EXCLUDED_FROM_AUTOBUY = ['One mind', 'Communal brainsweep', 'Elder Pact'];
         function tryOpportunisticUpgrades(bankBuffer) {
+            let candidates = [];
             for (let up of Game.UpgradesInStore) {
                 if (!up || up.pool === 'toggle' || up.name === 'Elder Covenant') continue;
                 if (EXCLUDED_FROM_AUTOBUY.includes(up.name)) continue;
@@ -247,18 +189,16 @@ Game.registerMod("cookie-bot-auto", {
                 } catch (e) {
                     cost = 0;
                 }
+                if (cost > 0) candidates.push({ up, cost });
+            }
 
-                if (cost > 0 && Game.cookies - bankBuffer >= cost && cost <= Game.cookies * OPPORTUNISTIC_MAX_COST_RATIO) {
-                    up.buy();
+            candidates.sort((a, b) => a.cost - b.cost); // termurah duluan
+
+            for (let cand of candidates) {
+                if (Game.cookies - bankBuffer >= cand.cost) {
+                    cand.up.buy();
                 }
             }
-        }
-
-        // placeholder buat ascension & heavenly upgrades -- BELUM AKTIF.
-        // begitu kamu udah pernah ascend, kita verifikasi struktur Game.UpgradesInStore
-        // versi heavenly/prestige bareng-bareng dulu, baru diisi logic pemilihan/pembeliannya di sini.
-        function tryHeavenlyUpgrades() {
-            return; // TODO: isi setelah verifikasi API pasca-ascend pertama
         }
 
         function hasClickBuffActive() {
@@ -369,46 +309,75 @@ Game.registerMod("cookie-bot-auto", {
         // -- karena rate combo (sold * rate) itu SAMA buat semua building (cuma tergantung level Godzamok,
         //    bukan jenis building), rasio ini pada dasarnya = 1 / harga-efektif -- jadi yang menang
         //    selalu building dengan harga per-unit paling murah relatif ke reward combo-nya
-        // -- gak jalan kalau Godzamok (Ruin) gak lagi di-slot, soalnya percuma
-        function tryBuyForGodzamokCombo(bankBuffer, godzamokLvl) {
-            if (!godzamokLvl) return;
+        //
+        // gabungan dari 2 fungsi lama (tryBuyForGodzamokCombo + tryBuyTrivialBuildings) -- keduanya
+        // sama-sama "beli building murah", tapi kriteria "murah"-nya beda, dan overlap-nya bikin salah
+        // satu jadi percuma kalau dijalanin terpisah (combo-farm selalu duluan & makan surplus abis-abisan,
+        // jadi trivial-buy gak pernah kebagian). Sekarang cuma jalan SALAH SATU tergantung Ruin ke-slot apa nggak:
+        // -- Ruin DI-SLOT: mode combo -- prioritas rasio untung-Godzamok (rate/harga-efektif), budget dipake
+        //    abis-abisan, cap 500 unit per building biar otomatis nyebar ke beberapa jenis building.
+        //    Building yang harga per-unitnya > 1 jam cpsRaw di-skip total dari kandidat (dicek per-unit
+        //    sepanjang batch beli, bukan cuma unit pertama) -- kalau segitu mahal relatif ke income,
+        //    gak sehat buat terus-terusan di-farm buat combo.
+        // -- Ruin GAK di-slot: mode trivial -- fallback lama, cuma beli yang harganya di bawah 1% dari cpsRaw
+        //    (gak ada gunanya farm buat combo kalau combo-nya sendiri gak aktif)
+        // dipake di tryBuyCheapBuildings mode fallback (Ruin gak di-slot)
+        const TRIVIAL_BUY_RATIO = 0.01; // 1% dari cpsRaw
 
-            let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
-            const SAFETY_MARGIN = 0.05;
+        function tryBuyCheapBuildings(bankBuffer, godzamokLvl, cpsRaw) {
+            if (godzamokLvl) {
+                let rate = godzamokLvl === 1 ? 0.01 : godzamokLvl === 2 ? 0.005 : 0.0025;
+                const SAFETY_MARGIN = 0.05;
+                const MAX_PRICE_SECONDS = 3600; // skip building yang harganya lebih dari 1 jam cpsRaw -- kalau segitu mahal, gak sehat buat di-farm terus-terusan
+                let maxPrice = cpsRaw * MAX_PRICE_SECONDS;
 
-            let candidates = [];
-            for (let obj of Game.ObjectsById) {
-                if (!obj) continue;
-                // building minigame sekarang ikut di-farm juga -- sell-nya udah disisain 1 unit di tryGodzamokCombo
+                let candidates = [];
+                for (let obj of Game.ObjectsById) {
+                    if (!obj) continue;
 
-                let price;
-                try {
-                    price = obj.getPrice();
-                } catch (e) {
-                    continue;
+                    let price;
+                    try {
+                        price = obj.getPrice();
+                    } catch (e) {
+                        continue;
+                    }
+                    if (!price || price <= 0) continue;
+                    if (price > maxPrice) continue; // kemahalan relatif ke CPS, skip total dari kandidat
+
+                    let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
+                    let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
+                    let effectiveCost = price * (1 - safeSellMult); // biaya bersih siklus jual-beli buat unit ini nanti
+                    if (effectiveCost <= 0) continue;
+
+                    candidates.push({ obj, ratio: rate / effectiveCost });
                 }
-                if (!price || price <= 0) continue;
 
-                let sellMult = typeof obj.getSellMultiplier === 'function' ? obj.getSellMultiplier() : 0.25;
-                let safeSellMult = Math.max(0, sellMult - SAFETY_MARGIN);
-                let effectiveCost = price * (1 - safeSellMult); // biaya bersih siklus jual-beli buat unit ini nanti
-                if (effectiveCost <= 0) continue;
+                candidates.sort((a, b) => b.ratio - a.ratio); // rasio terbaik (paling murah efektif) diproses duluan
 
-                candidates.push({ obj, ratio: rate / effectiveCost });
-            }
+                let budget = Math.max(0, Game.cookies - bankBuffer);
 
-            candidates.sort((a, b) => b.ratio - a.ratio); // rasio terbaik (paling murah efektif) diproses duluan
+                for (let cand of candidates) {
+                    if (budget <= 0) break;
 
-            let budget = Math.max(0, Game.cookies - bankBuffer);
+                    let result = calcAffordableUnits(cand.obj, budget, 500, maxPrice);
 
-            for (let cand of candidates) {
-                if (budget <= 0) break;
+                    if (result.n > 0) {
+                        cand.obj.buy(result.n); // satu kali panggil, satu kali suara
+                        budget -= result.cost;
+                    }
+                }
+            } else {
+                let trivialCost = cpsRaw * TRIVIAL_BUY_RATIO;
 
-                let result = calcAffordableUnits(cand.obj, budget, 500);
+                for (let obj of Game.ObjectsById) {
+                    if (!obj) continue;
 
-                if (result.n > 0) {
-                    cand.obj.buy(result.n); // satu kali panggil, satu kali suara
-                    budget -= result.cost;
+                    let budget = Math.max(0, Game.cookies - bankBuffer);
+                    let result = calcAffordableUnits(obj, budget, 200, trivialCost);
+
+                    if (result.n > 0) {
+                        obj.buy(result.n); // satu kali panggil -> satu kali suara, bukan n kali
+                    }
                 }
             }
         }
@@ -477,7 +446,6 @@ Game.registerMod("cookie-bot-auto", {
                 let obj = Game.ObjectsById[id];
                 if (obj && obj.amount > 0 && obj.level < 1 && Game.lumps >= obj.level + 1) {
                     obj.levelUp();
-                    setCategoryHighlight('sugarLump', findEl(obj, false), '#cc66ff');
                     return; // 1 lump per tick cukup, biar gak nge-drain semua lump sekaligus
                 }
             }
@@ -496,27 +464,6 @@ Game.registerMod("cookie-bot-auto", {
 
             if (bestObj && Game.lumps >= bestObj.level + 1) {
                 bestObj.levelUp();
-                setCategoryHighlight('sugarLump', findEl(bestObj, false), '#cc66ff');
-            }
-        }
-
-        // building yang harganya di bawah 1% dari CPS base (bukan yang lagi kena buff) -> beli langsung,
-        // gak perlu nunggu menang di ranking payback-period, soalnya biayanya gak signifikan
-        // -- itung dulu semua unit yang masih trivial + dalam budget, baru buy(n) SEKALI (biar suara gak spam)
-        const TRIVIAL_BUY_RATIO = 0.01; // 1% dari cpsRaw
-        function tryBuyTrivialBuildings(bankBuffer, cpsRaw) {
-            let trivialCost = cpsRaw * TRIVIAL_BUY_RATIO;
-
-            for (let obj of Game.ObjectsById) {
-                if (!obj) continue;
-
-                let budget = Math.max(0, Game.cookies - bankBuffer);
-                let result = calcAffordableUnits(obj, budget, 200, trivialCost);
-
-                if (result.n > 0) {
-                    obj.buy(result.n); // satu kali panggil -> satu kali suara, bukan n kali
-                    setCategoryHighlight('trivialBuy', findEl(obj, false), '#33ff99');
-                }
             }
         }
 
@@ -557,16 +504,13 @@ Game.registerMod("cookie-bot-auto", {
             let bankBuffer = computeBankBuffer(cookies, cpsRaw);
 
             tryCastForceHand();
-            // tryTradeStocks(bankBuffer); // dimatiin -- boros kalau broker masih dikit
             tryPopWrinklers();
             trySpendSugarLumps();
 
             let godzamokLvl = Game.hasGod ? Game.hasGod('ruin') : 0;
-            tryBuyForGodzamokCombo(bankBuffer, godzamokLvl); // farm building murah buat combo Godzamok
+            tryBuyCheapBuildings(bankBuffer, godzamokLvl, cpsRaw); // farm/beli building murah -- mode combo kalau Ruin di-slot, mode trivial kalau nggak
 
-            tryBuyTrivialBuildings(bankBuffer, cpsRaw);
             tryOpportunisticUpgrades(bankBuffer);
-            tryHeavenlyUpgrades();
 
             // refresh semua basis kalkulasi, soalnya fungsi-fungsi di atas bisa langsung ngubah cookies/CPS beneran
             cookies = Game.cookies;
@@ -579,7 +523,6 @@ Game.registerMod("cookie-bot-auto", {
             if (pledge && pledge.unlocked && !pledge.bought && Game.UpgradesInStore.includes(pledge)) {
                 if (cookies - bankBuffer >= pledge.getPrice()) {
                     pledge.buy();
-                    setCategoryHighlight('elderPledge', findEl(pledge, true), '#ffff00');
                 }
             }
 
@@ -642,19 +585,6 @@ Game.registerMod("cookie-bot-auto", {
                 }
             }
 
-            // Highlight (box-shadow inset, biar gak ke-crop parent overflow:hidden)
-            let targetObj = finalAction.item;
-            let el = findEl(targetObj, finalAction.isUpgrade);
-
-            if (el !== lastEl) {
-                clear();
-                if (el) {
-                    el.style.boxShadow = 'inset 0 0 0 3px #00ff00';
-                    el.style.backgroundColor = 'rgba(0, 255, 0, 0.2)';
-                    lastEl = el;
-                }
-            }
-
             // Eksekusi beli
             let effectiveCookies = cookies - bankBuffer;
 
@@ -666,7 +596,6 @@ Game.registerMod("cookie-bot-auto", {
                         finalAction.item.buy(1);
                     }
                     refreshLuckyCache();
-                    clear();
                 }
             }
         }, 1000);
